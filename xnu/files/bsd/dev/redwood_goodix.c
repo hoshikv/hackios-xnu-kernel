@@ -1464,6 +1464,10 @@ bring_up(void)
 	const char *problem = "its clocks cannot be turned on";
 
 	board_detect();
+	if (board_peridot) {
+		max_x = 19520;          /* 1220 x 16, the panel's units in the touch report */
+		max_y = 43400;          /* 2712 x 16 */
+	}
 	show_state("as found");
 	touch_chip = touch_chip_detect();
 	printf("goodix: ID gpio96=%u gpio68=%u: selected %s\n", gpio_get(PIN_GOODIX_ID),
@@ -1601,12 +1605,17 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 void
 redwood_goodix_init(void)
 {
+	static bool started;
 	uint32_t enabled = 0;
 	thread_t thread;
 
+	if (started) {
+		return;
+	}
 	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
+	started = true;
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
 	if (kernel_thread_start(goodix_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);

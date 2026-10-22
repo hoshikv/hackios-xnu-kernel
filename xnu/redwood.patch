@@ -379,6 +379,16 @@ index 4df41ba1f61b..16cf4fd8d8f1 100644
  
  #if DEBUG_BSDINIT
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+@@ -856,6 +856,9 @@ bsd_init(void)
+ 	bsd_init_kprintf("calling inittodr\n");
+ 	inittodr(0);
+ 
++	/* touch polls are logged before the root mount can wait forever */
++	redwood_goodix_init();
++
+ 	/* Mount the root file system. */
+ 	while (TRUE) {
+ 		int err;
 @@ -976,6 +983,14 @@ bsd_init(void)
  
  		bsd_init_kprintf("calling devfs_kernel_mount\n");
