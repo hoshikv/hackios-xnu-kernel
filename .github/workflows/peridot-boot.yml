@@ -1,14 +1,6 @@
 name: peridot-boot
 on:
   workflow_dispatch:
-  push:
-    branches: [ peridot ]
-    paths:
-      - 'common/devices/peridot.conf'
-      - 'xnuloader/**'
-      - 'uefi/**'
-      - 'mkxnuimg.py'
-      - '.github/workflows/peridot-boot.yml'
 
 permissions:
   contents: read
