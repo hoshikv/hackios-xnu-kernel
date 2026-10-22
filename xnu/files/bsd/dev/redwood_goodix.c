@@ -45,6 +45,7 @@ extern kern_return_t thread_terminate(thread_t thread);
 
 static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
 static vm_offset_t tlmm_phys = 0x0f100000UL;    /* redwood */
+static vm_offset_t se_phys = 0x00a94000UL;      /* redwood's touch serial engine */
 static vm_offset_t rsc_phys = 0x18220000UL;
 static vm_offset_t cmd_db_phys = 0x80860000UL;
 
@@ -93,6 +94,7 @@ static unsigned PIN_GOODIX_ID = 96;     /* ... and this reads 1 (sm8350-kernel-O
 #define PIN_FUNCTION_SPI        1       /* "qup15" */
 
 static bool board_peridot;
+static uint32_t touch_stage = 8;        /* boot-arg touch_stage=N: stop after step N (bring-up only) */
 
 /* The loader writes the platform name into /arm-io/device_type; peridot has its own wiring. */
 static void
@@ -114,6 +116,7 @@ board_detect(void)
 		PIN_INT = 129;
 		PIN_RESET = 128;
 		tlmm_phys = 0x0f000000UL;       /* Cliffs TLMM */
+		se_phys = 0x00a90000UL;         /* SE4: spi@a90000 */
 		rsc_phys = 0x17a20000UL;        /* apps RSC drv@2 */
 		cmd_db_phys = 0x81c60000UL;     /* aop_cmd_db_region */
 	}
@@ -1436,13 +1439,24 @@ chip_poll(void)
 static void
 show_state(const char *when)
 {
+	unsigned avdd_cfg = 0, avdd_io = 0, ft_id = 0, gx_id = 0;
+
+	/*
+	 * Peridot has no redwood AVDD strap and no id straps; its touch is known.  Do not read those
+	 * pins there: they are not part of the peridot wiring, and a stray read is not worth a hang.
+	 */
+	if (!board_peridot) {
+		avdd_cfg = rd(GPIO_CFG(PIN_AVDD));
+		avdd_io = rd(GPIO_IO(PIN_AVDD));
+		ft_id = gpio_get(PIN_FOCALTECH_ID);
+		gx_id = gpio_get(PIN_GOODIX_ID);
+	}
 	printf("goodix: %s: board %s, votes %#x, clocks %#x %#x %#x, rate cfg %#x dfs %#x; pins cs/clk/mosi/miso cfg %#x %#x %#x %#x,"
 	    " reset %#x/%u, int %#x/%u, avdd %#x/%u, straps %u %u\n", when,
 	    board_peridot ? "peridot" : "redwood", rd(GCC_VOTE), rd(GCC_QUP1_M_AHB_CBCR),
 	    rd(GCC_QUP1_S_AHB_CBCR), rd(GCC_QUP1_SE5_CBCR), rd(GCC_QUP1_SE5_CFG), rd(GCC_QUP1_SE5_DFSR), rd(GPIO_CFG(PIN_CS)),
 	    rd(GPIO_CFG(PIN_CLK)), rd(GPIO_CFG(PIN_MOSI)), rd(GPIO_CFG(PIN_MISO)), rd(GPIO_CFG(PIN_RESET)),
-	    rd(GPIO_IO(PIN_RESET)), rd(GPIO_CFG(PIN_INT)), rd(GPIO_IO(PIN_INT)), rd(GPIO_CFG(PIN_AVDD)), rd(GPIO_IO(PIN_AVDD)),
-	    gpio_get(68), gpio_get(96));
+	    rd(GPIO_IO(PIN_RESET)), rd(GPIO_CFG(PIN_INT)), rd(GPIO_IO(PIN_INT)), avdd_cfg, avdd_io, gx_id, ft_id);
 }
 
 /* Power the chip up from nothing, in the vendor driver's order. */
@@ -1498,10 +1512,18 @@ bring_up(void)
 		max_x = 19520;          /* 1220 x 16, the panel's units in the touch report */
 		max_y = 43400;          /* 2712 x 16 */
 	}
-	show_state("as found");
+	if (board_peridot) {
+		printf("goodix: peridot: skipping the redwood debug state and id straps\n");
+	} else {
+		show_state("as found");
+	}
 	touch_chip = touch_chip_detect();
-	printf("goodix: ID gpio96=%u gpio68=%u: selected %s\n", gpio_get(PIN_GOODIX_ID),
-	    gpio_get(PIN_FOCALTECH_ID), chip_name());
+	if (board_peridot) {
+		printf("goodix: selected %s\n", chip_name());
+	} else {
+		printf("goodix: ID gpio96=%u gpio68=%u: selected %s\n", gpio_get(PIN_GOODIX_ID),
+		    gpio_get(PIN_FOCALTECH_ID), chip_name());
+	}
 	if (!power_on()) {
 		printf("goodix: the touch supplies did not come on\n");
 		return false;
@@ -1568,17 +1590,75 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_poll_us", &poll_us, sizeof(poll_us));
 	PE_parse_boot_argn("touch_lat", &latency, sizeof(latency));
 	PE_parse_boot_argn("touch_debug", &touch_debug, sizeof(touch_debug));
+	PE_parse_boot_argn("touch_stage", &touch_stage, sizeof(touch_stage));
 	if (poll_us < 250 || poll_us > 100000) {
 		poll_us = 8000;
 	}
 	idle_looks = 80000 / poll_us;   /* a report read every 80 ms even with the line high, in case it is missed */
 
-	redwood_tl("tl: touch thread enter\n");
+	printf("goodix: touch_stage=%u: thread entered\n", touch_stage);
+	redwood_tl("tl: touch thread enter (stage %u)\n", touch_stage);
+	if (touch_stage <= 1) {
+		printf("goodix: touch_stage=1 done (thread only)\n");
+		thread_terminate(current_thread());
+		return;
+	}
 	tlmm = ml_io_map(tlmm_phys, TLMM_SIZE);
+	printf("goodix: touch_stage=%u: tlmm %#lx mapped from %#lx\n", touch_stage, (unsigned long)tlmm,
+	    (unsigned long)tlmm_phys);
+	redwood_tl("tl: tlmm %#lx\n", (unsigned long)tlmm);
+	if (touch_stage == 2) {
+		printf("goodix: touch_stage=2 done (tlmm map)\n");
+		thread_terminate(current_thread());
+		return;
+	}
 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
-	se = ml_io_map(SE_PHYS, SE_SIZE);
+	se = ml_io_map(se_phys, SE_SIZE);
+	printf("goodix: touch_stage=%u: gcc %#lx se %#lx mapped from %#lx\n", touch_stage, (unsigned long)gcc,
+	    (unsigned long)se, (unsigned long)se_phys);
 	redwood_tl("tl: maps tlmm=%#lx gcc=%#lx se=%#lx\n", (unsigned long)tlmm, (unsigned long)gcc,
 	    (unsigned long)se);
+	if (touch_stage == 3) {
+		printf("goodix: touch_stage=3 done (all maps)\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_stage == 4) {
+		printf("goodix: touch pins cfg cs=%#x clk=%#x mosi=%#x miso=%#x reset=%#x int=%#x\n",
+		    rd(GPIO_CFG(PIN_CS)), rd(GPIO_CFG(PIN_CLK)), rd(GPIO_CFG(PIN_MOSI)),
+		    rd(GPIO_CFG(PIN_MISO)), rd(GPIO_CFG(PIN_RESET)), rd(GPIO_CFG(PIN_INT)));
+		printf("goodix: strap pins g96=%u g68=%u, avdd g107 cfg=%#x io=%#x\n",
+		    gpio_get(PIN_GOODIX_ID), gpio_get(PIN_FOCALTECH_ID), rd(GPIO_CFG(PIN_AVDD)),
+		    rd(GPIO_IO(PIN_AVDD)));
+		printf("goodix: touch_stage=4 done (pin reads)\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_stage == 5) {
+		show_state("stage 5");
+		printf("goodix: touch_stage=5 done (show_state)\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_stage == 6) {
+		bool ok = power_on();
+
+		printf("goodix: touch_stage=6 done (power_on=%d, reset cfg=%#x int cfg=%#x)\n", ok,
+		    rd(GPIO_CFG(PIN_RESET)), rd(GPIO_CFG(PIN_INT)));
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_stage == 7) {
+		bool ok;
+
+		bitbang_init();
+		spi_transfer = bitbang_transfer;
+		printf("goodix: touch_stage=7: pins driven by hand, confirming\n");
+		ok = goodix_confirm();
+		printf("goodix: touch_stage=7 done (confirm=%d)\n", ok);
+		thread_terminate(current_thread());
+		return;
+	}
 
 	if (!bring_up()) {
 		printf("goodix: no %s touch screen\n", chip_name());
@@ -1647,9 +1727,15 @@ redwood_goodix_init(void)
 		return;
 	}
 	started = true;
+	redwood_tl("tl: goodix init: before board_detect\n");
+	printf("goodix: init: before board_detect\n");
 	board_detect();
+	redwood_tl("tl: goodix init: board_detect done\n");
+	printf("goodix: init: board_detect done\n");
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
 	if (kernel_thread_start(goodix_thread, NULL, &thread) == KERN_SUCCESS) {
+		redwood_tl("tl: goodix init: thread started\n");
+		printf("goodix: init: thread started\n");
 		thread_deallocate(thread);
 	}
 }
