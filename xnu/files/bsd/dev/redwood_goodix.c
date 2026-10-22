@@ -250,14 +250,13 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 	uint32_t irq_bit = 1u << TCS_ID;
 	bool done;
 
-	/* the slot set must be idle, and switched off the way the hardware wants it: trigger, then enable */
-	for (int i = 0; rd(TCS(TCS_STATUS)) == 0; i++) {
-		if (i > 2000) {
-			printf("goodix: RPMh: the command slots stay busy\n");
-			return false;
-		}
-		sleep_us(100);
-	}
+	/*
+	 * Do not gate on TCS_STATUS: an idle/disabled TCS reads 0, the same as a busy one.
+	 * Linux clears the stale command enables and triggers; the IRQ status bit is the
+	 * completion signal (rpmh_rsc_send_data in drivers/soc/qcom/rpmh-rsc.c).
+	 */
+	wr(TCS(TCS_CMD_ENABLE), 0);
+	wr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
 	wr(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
