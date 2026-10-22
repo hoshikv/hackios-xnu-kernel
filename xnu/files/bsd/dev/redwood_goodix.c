@@ -166,15 +166,22 @@ gpio_output(unsigned pin, bool high, unsigned pull, unsigned ma)
 #define TCS_IRQ_ENABLE          0x00
 #define TCS_IRQ_STATUS          0x04
 #define TCS_IRQ_CLEAR           0x08
-#define TCS_WAIT_FOR_COMPLETION 0x10
-#define TCS_CONTROL             0x14
+/*
+ * Cliffs (peridot) reports RPMH RSC v3.0: per-TCS registers move to 0x20..
+ * and commands are 24 bytes apart.  Redwood keeps the v2.7 layout.
+ * See rpmh_rsc_reg_offsets_ver_3_0[] in drivers/soc/qcom/rpmh-rsc.c.
+ */
+#define RSC_V3_0                (board_peridot)
+#define TCS_CMD_STRIDE          (RSC_V3_0 ? 24 : 20)
+#define TCS_WAIT_FOR_COMPLETION (RSC_V3_0 ? 0x20 : 0x10)
+#define TCS_CONTROL             (RSC_V3_0 ? 0x24 : 0x14)
 #define TCS_CONTROL_ENABLE      (1u << 16)
 #define TCS_CONTROL_TRIGGER     (1u << 24)
-#define TCS_STATUS              0x18            /* 0 while busy */
-#define TCS_CMD_ENABLE          0x1c
-#define TCS_CMD_MSGID(n)        (0x30 + 20 * (n))
-#define TCS_CMD_ADDR(n)         (0x34 + 20 * (n))
-#define TCS_CMD_DATA(n)         (0x38 + 20 * (n))
+#define TCS_STATUS              (RSC_V3_0 ? 0x28 : 0x18)       /* 0 while busy */
+#define TCS_CMD_ENABLE          (RSC_V3_0 ? 0x2c : 0x1c)
+#define TCS_CMD_MSGID(n)        ((RSC_V3_0 ? 0x34 : 0x30) + TCS_CMD_STRIDE * (n))
+#define TCS_CMD_ADDR(n)         (TCS_CMD_MSGID(n) + 4)
+#define TCS_CMD_DATA(n)         (TCS_CMD_MSGID(n) + 8)
 #define MSGID_WRITE_4_BYTES     0x10008
 #define MSGID_RESPONSE          0x100
 
@@ -309,8 +316,9 @@ regulator_on(const char *name, uint32_t millivolts)
 		printf("goodix: RPMh: no regulator \"%s\" (address %#x)\n", name, base);
 		return false;
 	}
-	printf("goodix: RPMh: %s is at %#x; slot status %#x, control %#x, irq enable %#x status %#x\n", name, base,
-	    rd(TCS(TCS_STATUS)), rd(TCS(TCS_CONTROL)), rd(TCS_COMMON(TCS_IRQ_ENABLE)), rd(TCS_COMMON(TCS_IRQ_STATUS)));
+	printf("goodix: RPMh: rsc %#x id %#x config %#x; %s at %#x; tcs status %#x, control %#x, irq enable %#x status %#x\n",
+	    rsc, rd(rsc), rd(rsc + 0x0c), name, base, rd(TCS(TCS_STATUS)), rd(TCS(TCS_CONTROL)),
+	    rd(TCS_COMMON(TCS_IRQ_ENABLE)), rd(TCS_COMMON(TCS_IRQ_STATUS)));
 	if (!rpmh_write(address, data, 3)) {
 		return false;
 	}
