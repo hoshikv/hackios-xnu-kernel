@@ -272,6 +272,22 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 }
 
 static bool
+rpmh_maps(void)
+{
+	if (rsc == 0) {
+		rsc = ml_io_map(rsc_phys, RSC_SIZE);
+	}
+	if (cmd_db == 0) {
+		cmd_db = ml_io_map_wcomb(cmd_db_phys, CMD_DB_SIZE);
+	}
+	if (rsc == 0 || cmd_db == 0) {
+		printf("goodix: cannot map RPMh (rsc %#lx, cmd-db %#lx)\n", (unsigned long)rsc, (unsigned long)cmd_db);
+		return false;
+	}
+	return true;
+}
+
+static bool
 regulator_on(const char *name, uint32_t millivolts)
 {
 	uint32_t base = rpmh_address(name);
@@ -300,6 +316,9 @@ static bool
 io_supply_on(void)
 {
 	if (board_peridot) {
+		if (!rpmh_maps()) {
+			return false;
+		}
 		if (!regulator_on("ldob23", 1800)) {
 			return false;
 		}
@@ -1554,12 +1573,12 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	idle_looks = 80000 / poll_us;   /* a report read every 80 ms even with the line high, in case it is missed */
 
-	board_detect();
+	redwood_tl("tl: touch thread enter\n");
 	tlmm = ml_io_map(tlmm_phys, TLMM_SIZE);
 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
 	se = ml_io_map(SE_PHYS, SE_SIZE);
-	rsc = ml_io_map(rsc_phys, RSC_SIZE);
-	cmd_db = ml_io_map_wcomb(cmd_db_phys, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
+	redwood_tl("tl: maps tlmm=%#lx gcc=%#lx se=%#lx\n", (unsigned long)tlmm, (unsigned long)gcc,
+	    (unsigned long)se);
 
 	if (!bring_up()) {
 		printf("goodix: no %s touch screen\n", chip_name());
@@ -1628,6 +1647,7 @@ redwood_goodix_init(void)
 		return;
 	}
 	started = true;
+	board_detect();
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
 	if (kernel_thread_start(goodix_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
