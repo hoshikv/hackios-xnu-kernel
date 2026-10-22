@@ -115,7 +115,7 @@ board_detect(void)
 		PIN_CS = 19;
 		PIN_INT = 129;
 		PIN_RESET = 128;
-		tlmm_phys = 0x0f000000UL;       /* Cliffs TLMM */
+		tlmm_phys = 0x0f100000UL;       /* Cliffs TLMM: tile offset 0x100000 */
 		se_phys = 0x00a90000UL;         /* SE4: spi@a90000 */
 		rsc_phys = 0x17a20000UL;        /* apps RSC drv@2 */
 		cmd_db_phys = 0x81c60000UL;     /* aop_cmd_db_region */
