@@ -105,3 +105,19 @@ Artifacts: out/peridot-boot.img, loader.efi, kernel if built.
   0x100000 only covered four cores and left boot CPU 7 without a redistributor.
 - ASSUMPTION: `kvfsrl` runs the build because the user requires it; if the queue is stalled,
   do not fall back to hoshikv Actions.
+
+## Boot result (first device run)
+
+- `fastboot boot` of the CI image works; UEFI + loader come up and USB fastboot
+  (`product: xnuloader`) enumerates on peridot.
+- With `bootcpu=7` the kernel aborts almost immediately (`Unclassified kernel abort`,
+  fault_code=0x10) right after `initialize_screen` / `pe_arm_init_interrupts`. Do not use
+  bootcpu=7 on peridot for now.
+- With the default boot CPU (core 0) and `cpus=1`, XNU boots past GIC setup:
+  `gic: v3, distributor ...`, then `pmap_startup`, `Darwin Kernel Version 22.5.0`, and
+  reaches `bsd_init` (Skywalk tests, `kminit`, `net_init_run`, `inittodr`). The peridot
+  framebuffer is recognised as 1220x2712, stride 4880.
+- `pe_arm_map_interrupt_controller: failed to find the interrupt-controller` is expected:
+  HackiOS's own `gic_v3_irq.c` initializes the GIC from `/arm-io/gic` afterwards.
+- No panic in the cpus=1 run; the run ended only because `loader_return_after=30` expired.
+- `peridot.conf` now boots on the default core (`bootcpu=7` removed).
