@@ -553,6 +553,15 @@ static const struct platform platform_redwood = {
 	.fb_base = 0xE1000000,
 };
 
+static const struct platform platform_peridot = {
+	.name = "peridot", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x17100000, .gic_redist = 0x17180000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	/* Cores 0-2 are Cortex-A520s, 3-6 Cortex-A720s, 7 a Cortex-X4. */
+	.small_cores = 0x07,
+	.fb_base = 0xE3940000,
+};
+
 /*
  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
@@ -560,6 +569,7 @@ static const struct platform platform_redwood = {
  */
 static const struct platform *const platforms[] = {
 	&platform_redwood,
+	&platform_peridot,
 };
 
 /* ------------------------------------------------------------------------ */
