@@ -156,11 +156,11 @@ gpio_output(unsigned pin, bool high, unsigned pull, unsigned ma)
 #define RSC_PHYS                0x18220000UL    /* the application processor's "DRV 2" */
 #define RSC_SIZE                0x10000UL
 /*
- * Peridot's channel 0 has three WAKE TCSes first, then two ACTIVE ones (peridot.dts:
- * qcom,tcs-config = <WAKE 3> <ACTIVE 2> ...), so the first active TCS is id 3.
- * Redwood used id 0.  Each TCS is 672 (0x2a0) bytes apart from tcs_base.
+ * qcom,tcs-config pairs are <type count>; peridot lists ACTIVE 3 first, so the
+ * active TCSes are ids 0..2 and SLEEP starts at 3 (redwood also uses id 0).
+ * Each TCS is 672 (0x2a0) bytes apart from tcs_base.
  */
-#define TCS_ID                  (board_peridot ? 3 : 0)
+#define TCS_ID                  0
 #define TCS(reg)                (rsc + 0xd00 + 672 * TCS_ID + (reg))
 #define TCS_COMMON(reg)         (rsc + 0xd00 + (reg))   /* IRQ enable/status/clear, one bit per TCS */
 #define TCS_IRQ_ENABLE          0x00
