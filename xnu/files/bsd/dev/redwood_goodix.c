@@ -155,7 +155,14 @@ gpio_output(unsigned pin, bool high, unsigned pull, unsigned ma)
 #define CMD_DB_SIZE             0x20000UL
 #define RSC_PHYS                0x18220000UL    /* the application processor's "DRV 2" */
 #define RSC_SIZE                0x10000UL
-#define TCS(reg)                (rsc + 0xd00 + (reg))           /* command slot set 0, an "active" one */
+/*
+ * Peridot's channel 0 has three WAKE TCSes first, then two ACTIVE ones (peridot.dts:
+ * qcom,tcs-config = <WAKE 3> <ACTIVE 2> ...), so the first active TCS is id 3.
+ * Redwood used id 0.  Each TCS is 672 (0x2a0) bytes apart from tcs_base.
+ */
+#define TCS_ID                  (board_peridot ? 3 : 0)
+#define TCS(reg)                (rsc + 0xd00 + 672 * TCS_ID + (reg))
+#define TCS_COMMON(reg)         (rsc + 0xd00 + (reg))   /* IRQ enable/status/clear, one bit per TCS */
 #define TCS_IRQ_ENABLE          0x00
 #define TCS_IRQ_STATUS          0x04
 #define TCS_IRQ_CLEAR           0x08
@@ -226,12 +233,12 @@ static bool
 rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
 {
 	for (int i = 0; i < 2000; i++) {
-		if ((rd(TCS(reg)) & mask) == value) {
+		if ((rd(TCS_COMMON(reg)) & mask) == value) {
 			return true;
 		}
 		sleep_us(100);
 	}
-	printf("goodix: RPMh: timeout waiting for %s (register %#x = %#x)\n", what, reg, rd(TCS(reg)));
+	printf("goodix: RPMh: timeout waiting for %s (register %#x = %#x)\n", what, reg, rd(TCS_COMMON(reg)));
 	return false;
 }
 
@@ -239,7 +246,8 @@ rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
 static bool
 rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 {
-	uint32_t irq_enable = rd(TCS(TCS_IRQ_ENABLE));
+	uint32_t irq_enable = rd(TCS_COMMON(TCS_IRQ_ENABLE));
+	uint32_t irq_bit = 1u << TCS_ID;
 	bool done;
 
 	/* the slot set must be idle, and switched off the way the hardware wants it: trigger, then enable */
@@ -252,7 +260,7 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 	}
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
-	wr(TCS(TCS_IRQ_CLEAR), 1);
+	wr(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
 	for (unsigned i = 0; i < count; i++) {
 		wr(TCS(TCS_CMD_MSGID(i)), MSGID_WRITE_4_BYTES | MSGID_RESPONSE);
 		wr(TCS(TCS_CMD_ADDR(i)), address[i]);
@@ -260,17 +268,17 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 	}
 	wr(TCS(TCS_WAIT_FOR_COMPLETION), (1u << count) - 1);
 	wr(TCS(TCS_CMD_ENABLE), (1u << count) - 1);
-	wr(TCS(TCS_IRQ_ENABLE), irq_enable | 1);        /* the status bit follows the enable; the interrupt itself stays masked */
+	wr(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable | irq_bit);   /* status follows the enable; the GIC interrupt stays masked */
 	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE);
 	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
 
-	done = rpmh_wait(TCS_IRQ_STATUS, 1, 1, "the request");
+	done = rpmh_wait(TCS_IRQ_STATUS, irq_bit, irq_bit, "the request");
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
 	wr(TCS(TCS_CMD_ENABLE), 0);
 	wr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
-	wr(TCS(TCS_IRQ_CLEAR), 1);
-	wr(TCS(TCS_IRQ_ENABLE), irq_enable);
+	wr(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
+	wr(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable);
 	return done;
 }
 
@@ -303,7 +311,7 @@ regulator_on(const char *name, uint32_t millivolts)
 		return false;
 	}
 	printf("goodix: RPMh: %s is at %#x; slot status %#x, control %#x, irq enable %#x status %#x\n", name, base,
-	    rd(TCS(TCS_STATUS)), rd(TCS(TCS_CONTROL)), rd(TCS(TCS_IRQ_ENABLE)), rd(TCS(TCS_IRQ_STATUS)));
+	    rd(TCS(TCS_STATUS)), rd(TCS(TCS_CONTROL)), rd(TCS_COMMON(TCS_IRQ_ENABLE)), rd(TCS_COMMON(TCS_IRQ_STATUS)));
 	if (!rpmh_write(address, data, 3)) {
 		return false;
 	}
@@ -758,12 +766,15 @@ goodix_confirm(void)
 	uint8_t answer[sizeof(pattern)];
 
 	for (int attempt = 0; attempt < 3; attempt++) {
+		redwood_tl("tl: goodix confirm try %d\n", attempt);
 		if (goodix_write(0x10000, pattern, sizeof(pattern)) &&
 		    goodix_read(0x10000, answer, sizeof(answer)) && memcmp(answer, pattern, sizeof(pattern)) == 0) {
+			redwood_tl("tl: goodix confirm ok\n");
 			return true;
 		}
 		sleep_ms(5);
 	}
+	redwood_tl("tl: goodix confirm failed\n");
 	return false;
 }
 
@@ -775,6 +786,7 @@ goodix_probe(bool verbose)
 	uint8_t version[28];
 	uint32_t length, offset;
 
+	redwood_tl("tl: goodix probe\n");
 	if (!goodix_read(GOODIX_FW_VERSION, version, sizeof(version))) {
 		return false;
 	}
@@ -1528,6 +1540,7 @@ bring_up(void)
 		printf("goodix: the touch supplies did not come on\n");
 		return false;
 	}
+	redwood_tl("tl: bring_up: power_on done\n");
 
 	if (!board_peridot && clocks_on()) {
 		printf("goodix: serial engine: firmware %#x, interface %#x, parameters %#x, source clock %u Hz (select %u)\n",
@@ -1546,6 +1559,7 @@ bring_up(void)
 		use_engine_pins();
 		spi_transfer = geni_transfer;
 		show_state("powered, on the serial engine");
+		redwood_tl("tl: bring_up: chip_probe on the engine\n");
 		if (chip_probe(true)) {
 			return true;
 		}
@@ -1562,6 +1576,7 @@ bring_up(void)
 		bitbang_in = attempt == 0 ? PIN_MISO : PIN_MOSI;
 		bitbang_out = attempt == 0 ? PIN_MOSI : PIN_MISO;
 		bitbang_init();
+		redwood_tl("tl: bring_up: chip_probe by hand %d\n", attempt);
 		if (chip_probe(true)) {
 			printf("goodix: %s answers on pins driven by hand (data in on gpio%u)\n", chip_name(), bitbang_in);
 			return true;
