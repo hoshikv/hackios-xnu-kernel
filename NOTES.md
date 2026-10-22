@@ -89,3 +89,19 @@ boot image via `mkxnuimg.py`. Device test uses `common/run.sh` / `./xl`.
 CI plan: add `.github/workflows/peridot.yml` that runs the script steps that do not need the
 7.4 GB IPSW (kernel/loader/boot-image); use prebuilt kernel/loader when the toolchain is absent.
 Artifacts: out/peridot-boot.img, loader.efi, kernel if built.
+
+## CI (peridot)
+
+- `.github/workflows/peridot-boot.yml` is dispatch-only and builds the UEFI, loader and boot
+  image. Actual runs are dispatched from `kvfsrl/peridot-xnu-build` (workflow
+  `.github/workflows/hackios-peridot.yml`), which checks out this fork at `peridot`.
+- First run (hoshikv, 39797488644) failed in `Build UEFI`: `llvm-objcopy: No such file or
+  directory`. Fixed by installing the `llvm` package next to clang/lld. The build now also
+  uses the system `nasm` through the Mu extdep state.
+- Run time is dominated by `uefi/apply.sh` (Mu-Silicium clone + recursive submodules, ~3 GB)
+  and pip, not by kernel compilation.
+- GIC redistributor window: peridot has 8 redistributor frames at stride 0x40000, so the ADT
+  `/arm-io/gic` now advertises 0x200000 bytes (`platform.gic_redist_size`). The old fixed
+  0x100000 only covered four cores and left boot CPU 7 without a redistributor.
+- ASSUMPTION: `kvfsrl` runs the build because the user requires it; if the queue is stalled,
+  do not fall back to hoshikv Actions.
