@@ -44,6 +44,9 @@ extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t thread_terminate(thread_t thread);
 
 static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
+static vm_offset_t tlmm_phys = 0x0f100000UL;    /* redwood */
+static vm_offset_t rsc_phys = 0x18220000UL;
+static vm_offset_t cmd_db_phys = 0x80860000UL;
 
 static inline uint32_t
 rd(vm_offset_t address)
@@ -110,6 +113,9 @@ board_detect(void)
 		PIN_CS = 19;
 		PIN_INT = 129;
 		PIN_RESET = 128;
+		tlmm_phys = 0x0f000000UL;       /* Cliffs TLMM */
+		rsc_phys = 0x17a20000UL;        /* apps RSC drv@2 */
+		cmd_db_phys = 0x81c60000UL;     /* aop_cmd_db_region */
 	}
 	printf("goodix: board %s: pins miso/mosi/clk/cs %u/%u/%u/%u, interrupt %u, reset %u\n",
 	    board_peridot ? "peridot" : "redwood", PIN_MISO, PIN_MOSI, PIN_CLK, PIN_CS, PIN_INT, PIN_RESET);
@@ -1424,10 +1430,16 @@ show_state(const char *when)
 static bool
 power_on(void)
 {
+	uint32_t no_rpmh = 0;
+
 	gpio_output(PIN_RESET, false, PULL_UP, 8);
 	gpio_configure(PIN_INT, 0, PULL_UP, 8, false);
-	if (!io_supply_on()) {
+	PE_parse_boot_argn("touch_no_rpmh", &no_rpmh, sizeof(no_rpmh));
+	if (!no_rpmh && !io_supply_on()) {
 		return false;
+	}
+	if (no_rpmh) {
+		printf("goodix: touch_no_rpmh=1: leaving the supplies as the loader set them\n");
 	}
 	if (board_peridot) {
 		sleep_ms(10);
@@ -1463,7 +1475,6 @@ bring_up(void)
 {
 	const char *problem = "its clocks cannot be turned on";
 
-	board_detect();
 	if (board_peridot) {
 		max_x = 19520;          /* 1220 x 16, the panel's units in the touch report */
 		max_y = 43400;          /* 2712 x 16 */
@@ -1543,11 +1554,12 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	idle_looks = 80000 / poll_us;   /* a report read every 80 ms even with the line high, in case it is missed */
 
-	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
+	board_detect();
+	tlmm = ml_io_map(tlmm_phys, TLMM_SIZE);
 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
 	se = ml_io_map(SE_PHYS, SE_SIZE);
-	rsc = ml_io_map(RSC_PHYS, RSC_SIZE);
-	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
+	rsc = ml_io_map(rsc_phys, RSC_SIZE);
+	cmd_db = ml_io_map_wcomb(cmd_db_phys, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
 
 	if (!bring_up()) {
 		printf("goodix: no %s touch screen\n", chip_name());
