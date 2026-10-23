@@ -827,13 +827,38 @@ static struct block rsc = { "rsc", 0x17a20000, 0x10000 };  /* dt: apps_rsc drv@2
 #define RSC_IRQ_STATUS          (RSC_TCS_BASE + 0x04)   /* a bit per TCS: done */
 #define RSC_IRQ_CLEAR           (RSC_TCS_BASE + 0x08)
 #define RSC_TCS(n)              (RSC_TCS_BASE + 672 * (n))
-#define TCS_WAIT_FOR_DONE       0x10
-#define TCS_CONTROL             0x14
-#define TCS_STATUS              0x18                    /* not zero: idle */
-#define TCS_ENABLED             0x1c
-#define TCS_COMMAND(c)          (0x30 + 20 * (c))       /* message id, address, value, status */
 #define TCS_ACTIVE_MODE         (1u << 16)
 #define TCS_TRIGGER             (1u << 24)
+
+/* The layout of a TCS depends on the sequencer's version: 2.7 has 20-byte commands, 3.0 has 24. */
+static uint32_t tcs_wait_for_done = 0x10, tcs_control = 0x14, tcs_status = 0x18, tcs_enabled = 0x1c;
+static uint32_t tcs_command = 0x30, tcs_command_size = 20;
+static bool rsc_layout_read;
+
+static void
+rsc_layout(void)
+{
+	uint32_t id, major, minor;
+
+	if (rsc_layout_read) {
+		return;
+	}
+	need(&rsc);
+	id = rd(rsc.base + 0);
+	major = (id >> 16) & 0xff;
+	minor = (id >> 8) & 0xff;
+	if (major >= 3) {
+		tcs_wait_for_done = 0x20;
+		tcs_control = 0x24;
+		tcs_status = 0x28;
+		tcs_enabled = 0x2c;
+		tcs_command = 0x34;
+		tcs_command_size = 24;
+	}
+	printf("adsp: %u: RSC version %u.%u (%#x): TCS status at %#x, commands at %#x/%u\n", step, major, minor, id,
+	    RSC_TCS(RPMH_TCS) + tcs_status, RSC_TCS(RPMH_TCS) + tcs_command, tcs_command_size);
+	rsc_layout_read = true;
+}
 #define MSGID_WRITE_WAITED      (8u | 1u << 8 | 1u << 16)       /* four bytes, an answer wanted, a write */
 #define RPMH_TCS                0                       /* the first of the two for requests made at once */
 
@@ -913,11 +938,11 @@ rails(uint32_t level)
 		}
 		values[r] = (uint32_t)position;
 	}
-	need(&rsc);
+	rsc_layout();
 	/* (the boot loader leaves the trigger set after its last request, done: idle is what the status says) */
-	if (rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS) == 0) {
+	if (rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_status) == 0) {
 		printf("adsp: %u: TCS %u of the sequencer is busy (status %#x, control %#x): the rails are not asked\n", step, RPMH_TCS,
-		    rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS), rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL));
+		    rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_status), rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control));
 		return false;
 	}
 	printf("adsp: %u: about to ask RPMh, through TCS %u, for lcx.lvl (%#x) = %u and lmx.lvl (%#x) = %u (level %u%s)\n", step,
@@ -926,16 +951,16 @@ rails(uint32_t level)
 	hold();
 	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
 	for (unsigned r = 0; r < 2; r++) {
-		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r), MSGID_WRITE_WAITED);
-		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r) + 4, addresses[r]);
-		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r) + 8, values[r]);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + tcs_command_size * r, MSGID_WRITE_WAITED);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + tcs_command_size * r + 4, addresses[r]);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + tcs_command_size * r + 8, values[r]);
 	}
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_WAIT_FOR_DONE, 3);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 3);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_wait_for_done, 3);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_enabled, 3);
 	settle();
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~TCS_TRIGGER);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_ACTIVE_MODE);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_TRIGGER);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control) & ~TCS_TRIGGER);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control) | TCS_ACTIVE_MODE);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control) | TCS_TRIGGER);
 	began = now_us();
 	while (now_us() - began < 100000) {
 		done = rd(rsc.base + RSC_IRQ_STATUS) & (1u << RPMH_TCS);
@@ -945,11 +970,11 @@ rails(uint32_t level)
 		sleep_us(50);
 	}
 	printf("adsp: %u: RPMh %s after %llu us; the commands' status %#x %#x, the TCS's %#x\n", step, done ? "HAS DONE IT" :
-	    "HAS NOT SAID DONE", now_us() - began, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(0) + 12),
-	    rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(1) + 12), rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS));
+	    "HAS NOT SAID DONE", now_us() - began, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + 12),
+	    rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + tcs_command_size + 12), rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_status));
 	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 0);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_enabled, 0);
 	return done != 0;
 }
 
