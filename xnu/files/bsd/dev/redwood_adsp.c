@@ -1928,10 +1928,8 @@ step_start(void)
 	}
 	rails_asked = true;
 	if (!mailbox_send("{class: image, res: load_state, name: adsp, val: on}")) {
-		rails(0);
-		rails_asked = false;
-		lck_mtx_unlock(&dsp_lock);
-		return false;
+		/* peridot's always-on processor does not always take this; it is not what starts the DSP */
+		printf("adsp: %u: THE ALWAYS-ON PROCESSOR DOES NOT TAKE THE IMAGE'S STATE: carrying on to TrustZone\n", step);
 	}
 	result = scm("to authenticate the audio DSP's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, PAS_ADSP, 0, 0,
 	    &answer);
