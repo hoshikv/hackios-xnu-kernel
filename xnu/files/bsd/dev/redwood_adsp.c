@@ -20,8 +20,8 @@
  *   - processor 2 (not 13) in the shared memory; its SMP2P items 443 (its) and 429 (ours), its
  *     last words in item 423; GLINK's three items in our partition with it
  *   - its doorbells are IPCC client 3 (LPASS): signal 0 GLINK, signal 2 SMP2P
- *   - TrustZone knows it as image 1; its memory is 0x86700000, 64 MB (dt: qcom,lpass@3700000,
- *     reserved-memory adsp@86700000), every byte of which the image takes
+ *   - TrustZone knows it as image 1; its memory is 0x9d400000, 69 MB (dt: qcom,lpass@3700000,
+ *     reserved-memory adspslpi_region@9d400000), every byte of which the image takes
  *   - the always-on processor is told of it as "adsp"
  *   - the Wi-Fi DSP may be running at the same time (wifi=1): the mailbox to the always-on
  *     processor and the lock for allocating in the shared memory are the two things both use,
@@ -286,7 +286,7 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
 
 /* ---- the shared memory (redwood_wifi.c, step 1) --------------------------------------------------- */
 
-#define SMEM_PHYS               0x80900000UL
+#define SMEM_PHYS               0x81d00000UL
 #define SMEM_SIZE               0x00200000u
 #define SMEM_US                 0
 #define SMEM_ADSP               2               /* dt: qcom,remote-pid of qcom,smp2p-adsp and qcom,glink/adsp */
@@ -332,7 +332,7 @@ static bool
 smem_peek(uint64_t offset, void *to, uint32_t size)
 {
 	if (smem == NULL) {
-		smem = (const volatile uint8_t *)ml_io_map_unmappable(SMEM_PHYS, SMEM_SIZE, VM_WIMG_WCOMB);
+		smem = (const volatile uint8_t *)ml_io_map_unmappable(SMEM_PHYS, SMEM_SIZE, VM_WIMG_COPYBACK);
 	}
 	if (offset + size > SMEM_SIZE) {
 		return false;
@@ -614,7 +614,7 @@ static struct block aoss = { "mailbox", 0x0c300000, 0x400 };
 #define IPCC_GLINK              0u
 #define IPCC_SMP2P              2u
 
-static struct block ipcc = { "ipcc", 0x00408000, 0x1000 };
+static struct block ipcc = { "ipcc", 0x00406000, 0x1000 };
 
 static struct {
 	uint32_t glink, smp2p, said;
@@ -782,7 +782,7 @@ out:
  * the list of its levels that the boot loader's command database keeps (cmd-db.c), the first
  * position at or above the level wanted.
  */
-#define CMD_DB_PHYS             0x80860000UL
+#define CMD_DB_PHYS             0x81c60000UL
 #define CMD_DB_SIZE             0x20000UL
 
 struct cmd_db_slave {
@@ -804,7 +804,7 @@ struct cmd_db_entry {
 
 static const struct cmd_db_header *cmd_db;
 
-static struct block rsc = { "rsc", 0x18220000, 0x10000 };
+static struct block rsc = { "rsc", 0x17a00000, 0x10000 };
 #define RSC_TCS_BASE            0xd00
 #define RSC_IRQ_STATUS          (RSC_TCS_BASE + 0x04)   /* a bit per TCS: done */
 #define RSC_IRQ_CLEAR           (RSC_TCS_BASE + 0x08)
@@ -961,8 +961,8 @@ step_survey(void)
 
 /* ---- step 2: the firmware -------------------------------------------------------------------------- */
 
-#define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
-#define ADSP_MEMORY_SIZE        0x04000000u
+#define ADSP_MEMORY             0x9d400000u     /* dt: reserved-memory adspslpi_region@9d400000 (peridot: 0x4500000 bytes) */
+#define ADSP_MEMORY_SIZE        0x04500000u
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
 
 
@@ -1057,7 +1057,7 @@ image_file(const char *name, uint64_t *size)
 
 
 #define MDT_HASH(flags)         (((flags) >> 24 & 7) == 2)
-#define MAX_SEGMENTS            48
+#define MAX_SEGMENTS            64
 
 struct elf_segment {
 	uint32_t type, offset, vaddr, paddr, file_size, memory_size, flags, align;
