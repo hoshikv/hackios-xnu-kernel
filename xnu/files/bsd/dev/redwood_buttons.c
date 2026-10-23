@@ -301,6 +301,7 @@ static struct button {
 	bool            live;           /* it has been seen released */
 	bool            last;           /* the look before this one */
 	bool            down;           /* as reported */
+	bool            active_high;    /* the pin reads high while the key is held */
 	uint64_t        since;          /* when it went down */
 	uint32_t        presses;
 } power = { .name = "power", .record = REDWOOD_BUTTON_LOCK },
