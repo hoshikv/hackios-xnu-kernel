@@ -376,7 +376,7 @@ buttons_poll(void)
 	if (volume_up.usable) {
 		problem = spmi_read(&pin, REG_RT_STATUS, &status, 1);
 		if (problem == NULL) {
-			button_look(&volume_up, !(status & GPIO_LEVEL));
+			button_look(&volume_up, volume_up.active_high ? !!(status & GPIO_LEVEL) : !(status & GPIO_LEVEL));
 		} else if (said < 8) {
 			said++;
 			printf("buttons: reading %s: %s\n", pin.name, problem);
@@ -462,14 +462,17 @@ pin_input(void)
 	    "%02x %02x; level %s\n", mode, mode == 0 ? "input" : mode == 1 ? "output" : mode == 2 ? "input and output" : "analog",
 	    c[GPIO_REG_SUPPLY - GPIO_REG_MODE] & 7, pull, pull < 4 ? "up" : pull == 4 ? "down" : "none",
 	    (c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80) ? "enabled" : "DISABLED", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-	    (status & GPIO_LEVEL) ? "high (released)" : "LOW (held)");
-	if (mode != 0 || pull >= 4 || !(c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80)) {
-		printf("buttons: volume up's pin is not an enabled input with a pull-up. Making it one is a write to the PMIC, "
+	    (status & GPIO_LEVEL) ? "high" : "low");
+	if (mode != 0 || pull > 4 || !(c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80)) {
+		printf("buttons: volume up's pin is not an enabled input with a pull. Making it one is a write to the PMIC, "
 		    "which this driver does not do: volume up is left alone\n");
 		return;
 	}
+	volume_up.active_high = (pull == 4);
 	volume_up.usable = true;
-	volume_up.last = !(status & GPIO_LEVEL);
+	volume_up.last = volume_up.active_high ? !!(status & GPIO_LEVEL) : !(status & GPIO_LEVEL);
+	printf("buttons: volume up's pin keeps itself %s, so the key reads %s: watching it\n",
+	    volume_up.active_high ? "low" : "high", volume_up.active_high ? "high when held" : "low when held");
 }
 
 static void
