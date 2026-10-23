@@ -822,7 +822,7 @@ struct cmd_db_entry {
 
 static const struct cmd_db_header *cmd_db;
 
-static struct block rsc = { "rsc", 0x17a00000, 0x10000 };
+static struct block rsc = { "rsc", 0x17a20000, 0x10000 };  /* dt: apps_rsc drv@2, whose tcs-offset is 0xd00 */
 #define RSC_TCS_BASE            0xd00
 #define RSC_IRQ_STATUS          (RSC_TCS_BASE + 0x04)   /* a bit per TCS: done */
 #define RSC_IRQ_CLEAR           (RSC_TCS_BASE + 0x08)
