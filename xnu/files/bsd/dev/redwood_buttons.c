@@ -418,20 +418,24 @@ pon_inputs(void)
 
 	printf("buttons: next: read the status and the interrupt setup of %s (registers 0x1310 to 0x1319)\n", pon.name);
 	problem = spmi_read(&pon, REG_RT_STATUS, r, 8);
-	if (problem == NULL) {
-		problem = spmi_read(&pon, REG_INT_LATCHED, more, 2);
-	}
 	if (problem != NULL) {
 		printf("buttons: %s: %s\n", pon.name, problem);
+		return;
+	}
+	/* The status is enough to watch the keys; some PON revisions do not expose 0x1318/0x1319. */
+	power.usable = volume_down.usable = true;
+	power.last = r[0] & PON_KPDPWR;
+	volume_down.last = r[0] & PON_RESIN;
+	problem = spmi_read(&pon, REG_INT_LATCHED, more, 2);
+	if (problem != NULL) {
+		printf("buttons: power-on block: status %#x (power %s, volume down %s); interrupt registers: %s\n", r[0],
+		    (r[0] & PON_KPDPWR) ? "HELD" : "released", (r[0] & PON_RESIN) ? "HELD" : "released", problem);
 		return;
 	}
 	printf("buttons: power-on block: status %#x (power %s, volume down %s); interrupts: edge %#x, high %#x, low %#x, "
 	    "enabled %#x, latched %#x, pending %#x\n", r[0], (r[0] & PON_KPDPWR) ? "HELD" : "released",
 	    (r[0] & PON_RESIN) ? "HELD" : "released", r[REG_INT_SET_TYPE - REG_RT_STATUS], r[REG_INT_POLARITY_HIGH - REG_RT_STATUS],
 	    r[REG_INT_POLARITY_LOW - REG_RT_STATUS], r[REG_INT_ENABLED - REG_RT_STATUS], more[0], more[1]);
-	power.usable = volume_down.usable = true;
-	power.last = r[0] & PON_KPDPWR;
-	volume_down.last = r[0] & PON_RESIN;
 }
 
 /* Step 4 for the pin: it is volume up only if it is an input with a pull-up, and switched on. */
