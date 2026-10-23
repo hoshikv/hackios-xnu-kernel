@@ -689,7 +689,6 @@ static bool (*spi_transfer)(const uint8_t *tx, uint8_t *rx, uint32_t length);
 
 static uint8_t spi_tx[8 + GOODIX_MAX_READ], spi_rx[8 + GOODIX_MAX_READ];
 static uint32_t touch_address, command_address;
-static const char *report_rate = "240";        /* what the status line says (touch_rate=480) */
 static uint32_t max_x = 10800, max_y = 24000;   /* the device tree's; the chip may say otherwise */
 
 static bool
@@ -888,43 +887,37 @@ goodix_command(uint8_t command, uint8_t data)
 	return false;
 }
 
-/* What has been seen so far: said once a minute, so that the end of the log always tells. */
+/* Counters for diagnostics; nothing here is printed in the steady state. */
 static struct {
 	uint32_t polls, reports, touches, bad, last_x, last_y;
 } seen;
 
-static uint32_t touch_debug;
-
 /* Which fingers were down in the last report, and where. */
 static struct {
 	bool down, seen;
-	uint32_t x, y;
+	uint32_t x, y;                  /* scaled for the input queue */
+	uint32_t raw_x, raw_y;          /* as the chip reported them, for the log */
 } contact[GOODIX_MAX_TOUCHES];
 static uint32_t flip;           /* boot-arg touch_flip: 1 = mirror left-right, 2 = mirror top-bottom */
 
 static void
 goodix_report(const uint8_t *touches, uint32_t count)
 {
-	static unsigned shown;
-
 	for (int i = 0; i < GOODIX_MAX_TOUCHES; i++) {
 		contact[i].seen = false;
 	}
 	for (uint32_t i = 0; i < count; i++) {
 		const uint8_t *t = touches + 8 * i;
 		uint32_t id = t[0] >> 4, kind = t[0] & 0xf;
-		uint32_t x = le16(t + 2), y = le16(t + 4);
+		uint32_t raw_x = le16(t + 2), raw_y = le16(t + 4);
+		uint32_t x = raw_x, y = raw_y;
 
 		if (id >= GOODIX_MAX_TOUCHES || kind == 1 || kind == 3) {       /* 1 and 3: a stylus */
 			continue;
 		}
-		if (shown < 40) {
-			shown++;
-			printf("goodix: finger %u at %u, %u (of %u x %u)\n", id, x, y, max_x, max_y);
-		}
 		seen.touches++;
-		seen.last_x = x;
-		seen.last_y = y;
+		seen.last_x = raw_x;
+		seen.last_y = raw_y;
 		x = x >= max_x ? 65535 : x * 65535 / max_x;
 		y = y >= max_y ? 65535 : y * 65535 / max_y;
 		if (flip & 1) {
@@ -935,6 +928,7 @@ goodix_report(const uint8_t *touches, uint32_t count)
 		}
 		contact[id].seen = true;
 		if (!contact[id].down) {
+			redwood_tl("tl: touch down %u %u %u\n", id, raw_x, raw_y);
 			redwood_touch_post(REDWOOD_TOUCH_DOWN, id, x, y);
 		} else if (contact[id].x != x || contact[id].y != y) {
 			redwood_touch_post(REDWOOD_TOUCH_MOVE, id, x, y);
@@ -942,11 +936,14 @@ goodix_report(const uint8_t *touches, uint32_t count)
 		contact[id].down = true;
 		contact[id].x = x;
 		contact[id].y = y;
+		contact[id].raw_x = raw_x;
+		contact[id].raw_y = raw_y;
 	}
 	/* a finger that is no longer in the report has lifted */
 	for (uint32_t id = 0; id < GOODIX_MAX_TOUCHES; id++) {
 		if (contact[id].down && !contact[id].seen) {
 			contact[id].down = false;
+			redwood_tl("tl: touch up %u %u %u\n", id, contact[id].raw_x, contact[id].raw_y);
 			redwood_touch_post(REDWOOD_TOUCH_UP, id, contact[id].x, contact[id].y);
 		}
 	}
@@ -967,10 +964,6 @@ goodix_poll(void)
 		return;
 	}
 	seen.reports++;
-	if (touch_debug) {
-		printf("goodix: raw %02x %02x %02x %02x %02x %02x %02x %02x count %u\n", report[0], report[1],
-		    report[2], report[3], report[4], report[5], report[6], report[7], report[2] & 0xf);
-	}
 	count = report[2] & 0xf;
 	if ((report[0] & GOODIX_STATUS_TOUCH) && count > 2 && count <= GOODIX_MAX_TOUCHES &&
 	    !goodix_read(touch_address + 8, report + 8, 8 * count + 2)) {
@@ -989,6 +982,11 @@ goodix_poll(void)
 		if ((report[2] & 0xf) == GOODIX_REQUEST_RESET || report[2] == GOODIX_REQUEST_RESET) {
 			printf("goodix: the chip asks to be reset\n");
 			touch_reset();
+			if (!goodix_confirm()) {
+				redwood_tl("tl: touch reset: confirm failed\n");
+			} else if (!goodix_probe(false)) {
+				redwood_tl("tl: touch reset: probe failed\n");
+			}
 		}
 		return;
 	}
@@ -1606,12 +1604,11 @@ static void
 goodix_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	unsigned idle = 0, idle_looks;
-	uint32_t poll_us = 8000, latency = 0, reads = 0;
-	uint64_t before = 0, reading = 0;
+	uint32_t poll_us = 8000, latency = 0;
+	uint64_t before = 0;
 
 	PE_parse_boot_argn("touch_poll_us", &poll_us, sizeof(poll_us));
 	PE_parse_boot_argn("touch_lat", &latency, sizeof(latency));
-	PE_parse_boot_argn("touch_debug", &touch_debug, sizeof(touch_debug));
 	PE_parse_boot_argn("touch_stage", &touch_stage, sizeof(touch_stage));
 	if (poll_us < 250 || poll_us > 100000) {
 		poll_us = 8000;
@@ -1695,12 +1692,11 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 		if (PE_parse_boot_argn("touch_rate", &rate, sizeof(rate)) && rate == 480 && touch_chip == TOUCH_GOODIX) {
 			bool done = goodix_command(GOODIX_CMD_HIGH_RATE, 1);
 
-			report_rate = done ? "480 (acknowledged)" : "240 (480 NOT ACKNOWLEDGED)";
 			printf("goodix: reports 480 times a second (command %#x at %#x): %s\n", GOODIX_CMD_HIGH_RATE, command_address,
 			    done ? "acknowledged" : "NOT ACKNOWLEDGED");
 		}
 	}
-	for (unsigned tick = 1;; tick++) {
+	for (;;) {
 		uint64_t looked = micros_now(), read_at;
 
 		/* the interrupt line is low while a report waits; look anyway every 80 ms in case it is missed */
@@ -1708,29 +1704,14 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 			idle = 0;
 			chip_poll();
 			read_at = micros_now();
-			reads++;
-			reading += read_at - looked;
 			if (latency) {
 				redwood_tl("tl: c before %llu seen %llu read %llu\n", before, looked, read_at);
 			}
 		} else if (++idle >= idle_looks) {
 			idle = 0;
 			chip_poll();
-			reads++;
-			reading += micros_now() - looked;
 		}
 		before = looked;
-		if (touch_debug) {
-			printf("tl: tick %u int %s polls %u reports %u touches %u last %u,%u\n", tick,
-			    gpio_get(PIN_INT) ? "high" : "low", seen.polls, seen.reports, seen.touches,
-			    seen.last_x, seen.last_y);
-		}
-		if (tick % (60 * (1000000 / poll_us)) == 0) {
-			printf("%s: so far %u reports in %u looks (%u bad), %u finger positions, the last at %u, %u; "
-			    "interrupt line %s; a report takes %llu us to read; the line looked at every %u us, reports %s a second\n",
-			    chip_name(), seen.reports, seen.polls, seen.bad, seen.touches, seen.last_x, seen.last_y,
-			    gpio_get(PIN_INT) ? "high" : "low", reads ? reading / reads : 0, poll_us, report_rate);
-		}
 		sleep_us(poll_us);
 	}
 }
