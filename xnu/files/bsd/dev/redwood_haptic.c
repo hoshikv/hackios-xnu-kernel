@@ -58,6 +58,7 @@
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <sys/redwood_audio.h>
+#include "redwood_haptic_fw.h"
 #include <sys/redwood_input.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -581,15 +582,12 @@ wait_standby(unsigned ms)
 static bool
 load_waveforms(void)
 {
-	uint64_t size = 0;
-	const uint8_t *file = redwood_wifi_file("aw8697_haptic.bin", &size);
+	const uint8_t *file = redwood_haptic_waveforms;
+	uint64_t size = sizeof(redwood_haptic_waveforms);
 	uint32_t sum = 0, base, length;
 	uint8_t address[2], back[64];
 
-	if (file == NULL || size < 8) {
-		say("haptic: no aw8697_haptic.bin in fw/ of the small image (fw-haptic/ when it is built)\n");
-		return false;
-	}
+	say("haptic: peridot's waveforms, built in: %llu bytes\n", size);
 	for (uint64_t i = 2; i < size; i++) {
 		sum += file[i];
 	}
