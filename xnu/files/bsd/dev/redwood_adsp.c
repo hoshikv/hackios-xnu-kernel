@@ -830,6 +830,8 @@ static struct block rsc = { "rsc", 0x17a20000, 0x10000 };  /* dt: apps_rsc drv@2
 #define TCS_ACTIVE_MODE         (1u << 16)
 #define TCS_TRIGGER             (1u << 24)
 
+#define RPMH_TCS                0                       /* the first of the two for requests made at once */
+
 /* The layout of a TCS depends on the sequencer's version: 2.7 has 20-byte commands, 3.0 has 24. */
 static uint32_t tcs_wait_for_done = 0x10, tcs_control = 0x14, tcs_status = 0x18, tcs_enabled = 0x1c;
 static uint32_t tcs_command = 0x30, tcs_command_size = 20;
@@ -860,7 +862,6 @@ rsc_layout(void)
 	rsc_layout_read = true;
 }
 #define MSGID_WRITE_WAITED      (8u | 1u << 8 | 1u << 16)       /* four bytes, an answer wanted, a write */
-#define RPMH_TCS                0                       /* the first of the two for requests made at once */
 
 /* The level position RPMh takes for that rail and level; -1: not found. */
 static int
