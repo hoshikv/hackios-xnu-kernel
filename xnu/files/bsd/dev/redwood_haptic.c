@@ -158,7 +158,7 @@ board_detect(void)
 static void
 show_pins(void)
 {
-	static const struct {
+	const struct {
 		unsigned pin;
 		const char *what;
 	} pins[] = { { PIN_SDA, "I2C data" }, { PIN_SCL, "I2C clock" }, { PIN_RESET, "reset" }, { PIN_INT, "interrupt" } };
