@@ -1530,7 +1530,7 @@ dtb_load(void)
 		printf("adsp: %u: no memory for the DTB's header\n", step);
 		goto fail;
 	}
-	memcpy((void *)page, header, header_size);
+	memcpy((void *)page, header, dtb_image.header_size);
 	for (vm_offset_t line = page; line < page + PAGE_SIZE; line += 64) {
 		__asm__ volatile ("dc civac, %0" : : "r" (line));
 	}
