@@ -328,6 +328,21 @@ struct smem_item {
 
 static const volatile uint8_t *smem;
 
+extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
+
+/*
+ * The shared memory is mapped cacheable here (an uncached mapping of its last page takes an
+ * external abort on this platform). The DSP is not coherent with our caches, so the lines we
+ * touch are cleaned and invalidated at the point of coherency around every access.
+ */
+static void
+smem_sync(uint32_t offset, uint32_t size)
+{
+	vm_offset_t start = (vm_offset_t)smem + (offset & ~63u);
+
+	FlushPoC_DcacheRegion(start, (vm_offset_t)smem + offset + size - start);
+}
+
 static bool
 smem_peek(uint64_t offset, void *to, uint32_t size)
 {
@@ -337,6 +352,7 @@ smem_peek(uint64_t offset, void *to, uint32_t size)
 	if (offset + size > SMEM_SIZE) {
 		return false;
 	}
+	smem_sync((uint32_t)offset, size);
 	for (uint32_t i = 0; i < size; i++) {
 		((uint8_t *)to)[i] = smem[offset + i];
 	}
@@ -347,11 +363,13 @@ static void
 smem_poke(uint32_t offset, uint32_t value)
 {
 	wr((vm_offset_t)smem + offset, value);
+	smem_sync(offset, sizeof(value));
 }
 
 static uint32_t
 smem_word(uint32_t offset)
 {
+	smem_sync(offset, sizeof(uint32_t));
 	return rd((vm_offset_t)smem + offset);
 }
 
