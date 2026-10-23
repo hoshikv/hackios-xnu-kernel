@@ -51,6 +51,7 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <machine/machine_routines.h>
+#include <pexpert/device_tree.h>
 #include <pexpert/pexpert.h>
 #include <miscfs/devfs/devfs.h>
 #include <sys/conf.h>
@@ -131,10 +132,28 @@ wait_ms(uint32_t ms)
 #define CFG_PULL_UP             3
 #define CFG_OUTPUT              (1u << 9)
 
-#define PIN_SDA                 36      /* the serial engine's first pin is the data line, the second the clock */
-#define PIN_SCL                 37
-#define PIN_RESET               35
-#define PIN_INT                 18
+static unsigned PIN_SDA = 36;           /* the serial engine's first pin is the data line, the second the clock */
+static unsigned PIN_SCL = 37;
+static unsigned PIN_RESET = 35;
+static unsigned PIN_INT = 18;
+
+/* The loader writes the platform name into /arm-io/device_type. */
+static void
+board_detect(void)
+{
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess &&
+	    size >= 7 && memcmp(prop, "peridot", 7) == 0) {
+		PIN_SDA = 52;           /* qupv3_se0_i2c: gpio52 data, gpio53 clock */
+		PIN_SCL = 53;
+		PIN_RESET = 30;         /* awinic_gpio_reset */
+		PIN_INT = 54;           /* awinic_gpio_int */
+	}
+}
 
 static void
 show_pins(void)
@@ -937,6 +956,7 @@ serve(void)
 static void
 haptic_thread(__unused void *parameter, __unused wait_result_t result)
 {
+	board_detect();
 	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
 	say("haptic: level %u: %s\n", level, level == 1 ? "a look, reading only" : level == 2 ? "the reset released, registers read" :
 	    level == 3 ? "the chip configured and its waveforms loaded, nothing played" : level == 4 ? "one effect played" :
