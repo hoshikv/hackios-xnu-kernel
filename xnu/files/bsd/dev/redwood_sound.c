@@ -1476,7 +1476,10 @@ redwood_sound_dsp_up(void)
 {
 	thread_t thread;
 
-	if (!PE_parse_boot_argn("sound", &level, sizeof(level)) || level == 0) {
+	if (!PE_parse_boot_argn("sound", &level, sizeof(level))) {
+		level = 4;      /* peridot: iOS playback by default; sound=0 turns it off */
+	}
+	if (level == 0) {
 		return;
 	}
 	if (level > 4) {

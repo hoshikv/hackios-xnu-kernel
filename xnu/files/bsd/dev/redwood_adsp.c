@@ -1007,7 +1007,10 @@ step_survey(void)
 
 #define ADSP_MEMORY             0x9d400000u     /* dt: reserved-memory adspslpi_region@9d400000 (peridot: 0x4500000 bytes) */
 #define ADSP_MEMORY_SIZE        0x04500000u
+#define ADSP_DTB_MEMORY         0xa1900000u     /* dt: reserved-memory q6_adsp_dtb_region@a1900000 (0x80000 bytes) */
+#define ADSP_DTB_MEMORY_SIZE    0x00080000u
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
+#define PAS_ADSP_DTB            0x24            /* dt: qcom,dtb-pas-id (cliffs-adsp-pas) */
 
 
 /*
@@ -1118,6 +1121,26 @@ static struct {
 	unsigned segments;
 	uint32_t size;
 } image;
+
+/*
+ * Peridot's ADSP takes a separate device tree, loaded through its own PAS channel (0x24) just
+ * past the DSP's own memory.  It is relocatable: the header's lowest segment address is not the
+ * address it runs at, so the segments are copied from that lowest address into a cleared
+ * 0xa1900000, the size TrustZone is told is their span.
+ */
+static struct {
+	const uint8_t *header;
+	uint64_t header_size;
+	struct {
+		uint32_t at, paddr;
+		uint32_t file_size, memory_size;
+		const uint8_t *file;
+	} segment[MAX_SEGMENTS];
+	unsigned segments;
+	uint32_t size;
+} dtb_image;
+
+static bool dtb_started;
 
 /* The image's files given back, if they were read into memory of ours. */
 static void
@@ -1384,6 +1407,173 @@ dsp_ask_to_stop(uint32_t bound_ms)
 
 static void link_stop(void);
 
+static void
+dtb_forget(void)
+{
+	if (dtb_image.header != NULL) {
+		void *data = (void *)(uintptr_t)dtb_image.header;
+
+		kfree_data(data, dtb_image.header_size);
+	}
+	for (unsigned s = 0; s < dtb_image.segments; s++) {
+		if (dtb_image.segment[s].file != NULL) {
+			void *data = (void *)(uintptr_t)dtb_image.segment[s].file;
+
+			kfree_data(data, dtb_image.segment[s].file_size);
+		}
+	}
+	bzero(&dtb_image, sizeof(dtb_image));
+}
+
+/*
+ * Load and start adsp_dtb.mdt through PAS 0x24.  Linux does this in adsp_load(), before the
+ * DSP's own image is authenticated; its absence is not fatal here, so an older root image can
+ * still bring the DSP up (the cost is that a DSP that needs its DT will not answer).
+ */
+static bool
+dtb_load(void)
+{
+	struct elf_segment segment;
+	const uint8_t *header;
+	uint64_t size = 0, files = 0;
+	uint32_t count, hashes = 0, lowest = ~0u, highest = 0;
+	uint64_t answer = ~0ull;
+	int32_t result;
+	vm_offset_t page = 0;
+	uint8_t *memory;
+	bool ok = false;
+
+	dtb_forget();
+	header = root_file("adsp_dtb.mdt", &size);
+	if (header == NULL) {
+		printf("adsp: %u: no /fw/adsp_dtb.mdt: starting the audio DSP without its device tree\n", step);
+		return true;
+	}
+	dtb_image.header = header;
+	dtb_image.header_size = size;
+	count = size >= 52 + 2 * 32 ? header[44] | header[45] << 8 : 0;
+	if (memcmp(header, "\177ELF\1", 5) != 0 || count < 1 || count > MAX_SEGMENTS || 52 + 32 * count > size ||
+	    size > PAGE_SIZE) {
+		printf("adsp: %u: fw/adsp_dtb.mdt is not such a header (%02x %02x %02x %02x, %u segments, %llu bytes)\n", step,
+		    header[0], header[1], header[2], header[3], count, size);
+		goto fail;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		char name[24];
+		uint64_t file_size = 0;
+
+		memcpy(&segment, header + 52 + 32 * i, sizeof(segment));
+		if (MDT_HASH(segment.flags)) {
+			hashes = segment.file_size;
+			continue;
+		}
+		if (segment.type != 1 || segment.memory_size == 0) {
+			continue;
+		}
+		if (segment.file_size > segment.memory_size) {
+			printf("adsp: %u: the DTB's segment %u is longer than the memory it asks for\n", step, i);
+			goto fail;
+		}
+		if (dtb_image.segments == MAX_SEGMENTS) {
+			printf("adsp: %u: the DTB has too many segments\n", step);
+			goto fail;
+		}
+		snprintf(name, sizeof(name), "adsp_dtb.b%02u", i);
+		if (segment.file_size != 0) {
+			dtb_image.segment[dtb_image.segments].file = root_file(name, &file_size);
+			if (dtb_image.segment[dtb_image.segments].file == NULL) {
+				goto fail;
+			}
+			if (file_size != segment.file_size) {
+				printf("adsp: %u: fw/%s has %llu bytes, the header says %u\n", step, name, file_size,
+				    segment.file_size);
+				dtb_image.segments++;
+				goto fail;
+			}
+			files += file_size;
+		}
+		dtb_image.segment[dtb_image.segments].at = 0;
+		dtb_image.segment[dtb_image.segments].paddr = segment.paddr;
+		dtb_image.segment[dtb_image.segments].file_size = segment.file_size;
+		dtb_image.segment[dtb_image.segments].memory_size = segment.memory_size;
+		if (segment.paddr < lowest) {
+			lowest = segment.paddr;
+		}
+		if (segment.paddr + segment.memory_size > highest) {
+			highest = segment.paddr + segment.memory_size;
+		}
+		dtb_image.segments++;
+	}
+	if (dtb_image.segments == 0 || lowest == ~0u || 52 + 32 * count + (uint64_t)hashes != size) {
+		printf("adsp: %u: the DTB is not what TrustZone takes: %u segments, the header file has %llu bytes\n", step,
+		    dtb_image.segments, size);
+		goto fail;
+	}
+	if ((uint64_t)highest - lowest > ADSP_DTB_MEMORY_SIZE) {
+		printf("adsp: %u: the DTB spans %#llx bytes, its reserved memory is %#x\n", step,
+		    (uint64_t)highest - lowest, ADSP_DTB_MEMORY_SIZE);
+		goto fail;
+	}
+	dtb_image.size = ((highest + 0xfff) & ~0xfffu) - lowest;
+	if (dtb_image.size > ADSP_DTB_MEMORY_SIZE) {
+		printf("adsp: %u: the DTB spans %#x bytes when rounded to a page, its reserved memory is %#x\n", step,
+		    dtb_image.size, ADSP_DTB_MEMORY_SIZE);
+		goto fail;
+	}
+	for (unsigned s = 0; s < dtb_image.segments; s++) {
+		dtb_image.segment[s].at = dtb_image.segment[s].paddr - lowest;
+	}
+	printf("adsp: %u: the DTB is whole: a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
+	    "bytes from %#x\n", step, size, hashes, dtb_image.segments, files, dtb_image.size, lowest);
+
+	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		printf("adsp: %u: no memory for the DTB's header\n", step);
+		goto fail;
+	}
+	memcpy((void *)page, header, header_size);
+	for (vm_offset_t line = page; line < page + PAGE_SIZE; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	settle();
+	result = scm("to take the audio DSP's DTB header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_ADSP_DTB,
+	    kvtophys(page), 0, &answer);
+	if (result != 0 || answer != 0) {
+		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB HEADER: the call returns %d, its answer is %#llx\n", step,
+		    result, answer);
+		goto fail;
+	}
+	result = scm("where the audio DSP's DTB will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP_DTB,
+	    ADSP_DTB_MEMORY, dtb_image.size, &answer);
+	if (result != 0 || answer != 0) {
+		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB'S PLACE: the call returns %d, its answer is %#llx\n", step,
+		    result, answer);
+		goto fail;
+	}
+	memory = (uint8_t *)ml_io_map_unmappable(ADSP_DTB_MEMORY, ADSP_DTB_MEMORY_SIZE, VM_WIMG_WCOMB);
+	if (memory == NULL) {
+		printf("adsp: %u: no mapping for the DTB's memory at %#x\n", step, ADSP_DTB_MEMORY);
+		goto fail;
+	}
+	memset(memory, 0, dtb_image.size);
+	for (unsigned s = 0; s < dtb_image.segments; s++) {
+		memcpy(memory + dtb_image.segment[s].at, dtb_image.segment[s].file, dtb_image.segment[s].file_size);
+	}
+	settle();
+	result = scm("to authenticate the audio DSP's DTB and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE,
+	    PAS_ADSP_DTB, 0, 0, &answer);
+	if (result != 0 || answer != 0) {
+		printf("adsp: %u: TRUSTZONE DOES NOT START THE DTB: the call returns %d, its answer is %#llx\n", step, result,
+		    answer);
+		goto fail;
+	}
+	dtb_started = true;
+	printf("adsp: %u: THE AUDIO DSP'S DTB IS STARTED: %#x bytes at %#x\n", step, dtb_image.size, ADSP_DTB_MEMORY);
+	ok = true;
+fail:
+	dtb_forget();
+	return ok;
+}
+
 /* Asked to stop, then shut down by TrustZone, then the always-on processor told that the image is gone. */
 static bool
 dsp_shutdown(const char *why)
@@ -1403,6 +1593,18 @@ dsp_shutdown(const char *why)
 		return false;
 	}
 	printf("adsp: %u: THE AUDIO DSP IS SHUT DOWN\n", step);
+	if (dtb_started) {
+		answer = ~0ull;
+		result = scm("to shut the audio DSP's DTB down", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_ADSP_DTB, 0, 0,
+		    &answer);
+		if (result != 0 || answer != 0) {
+			printf("adsp: %u: TRUSTZONE DOES NOT SHUT THE DTB DOWN: the call returns %d, its answer is %#llx\n", step,
+			    result, answer);
+		} else {
+			printf("adsp: %u: THE AUDIO DSP'S DTB IS SHUT DOWN\n", step);
+			dtb_started = false;
+		}
+	}
 	need(&ipcc);
 	wr(ipcc.base + IPCC_DISABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
 	doorbells();
@@ -1441,6 +1643,11 @@ step_header(void)
 		}
 	} else {
 		printf("adsp: %u: the DSP has left nothing in the shared memory: it has not run since the phone was started\n", step);
+	}
+
+	announce("load the audio DSP's device tree through its own PAS channel (0x24)");
+	if (!dtb_load()) {
+		return false;
 	}
 
 	announce("hand the image's header to TrustZone to check its signature (image 1), in a page of ours");
@@ -3243,8 +3450,13 @@ redwood_adsp_init(void)
 	thread_t thread;
 
 	PE_parse_boot_argn("adsp_step", &last_step, sizeof(last_step));
-	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
-		return;
+	if (last_step == 0) {
+		if (!PE_parse_boot_argn("adsp", &on, sizeof(on))) {
+			on = 1;         /* peridot: audio comes up by default; adsp=0 turns it off */
+		}
+		if (on != 1) {
+			return;
+		}
 	}
 	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
 		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");

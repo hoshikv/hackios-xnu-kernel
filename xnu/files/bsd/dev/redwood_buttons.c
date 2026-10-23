@@ -593,9 +593,7 @@ redwood_buttons_init(void)
 	 * has pressed all three keys and each press and release was read as it was made.
 	 */
 	if (!PE_parse_boot_argn("buttons", &enabled, sizeof(enabled))) {
-		uint32_t touch_screen = 0;
-
-		enabled = PE_parse_boot_argn("touchscreen", &touch_screen, sizeof(touch_screen)) && touch_screen != 0;
+		enabled = 1;    /* peridot: power and the volume keys are watched by default; buttons=0 turns them off */
 	}
 	if (!enabled) {
 		return;

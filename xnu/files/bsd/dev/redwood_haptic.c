@@ -997,7 +997,10 @@ redwood_haptic_init(void)
 {
 	thread_t thread;
 
-	if (!PE_parse_boot_argn("haptic", &level, sizeof(level)) || level == 0) {
+	if (!PE_parse_boot_argn("haptic", &level, sizeof(level))) {
+		level = 5;      /* peridot: the motor for iOS by default; haptic=0 turns it off */
+	}
+	if (level == 0) {
 		return;
 	}
 	if (level > 5) {

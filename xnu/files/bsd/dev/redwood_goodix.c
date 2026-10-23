@@ -1726,7 +1726,10 @@ redwood_goodix_init(void)
 	if (started) {
 		return;
 	}
-	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled)) || !enabled) {
+	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled))) {
+		enabled = 1;    /* peridot: the panel is on by default; touchscreen=0 turns it off */
+	}
+	if (!enabled) {
 		return;
 	}
 	started = true;
