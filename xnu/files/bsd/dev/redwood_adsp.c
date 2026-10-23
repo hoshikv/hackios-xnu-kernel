@@ -1457,12 +1457,12 @@ step_image(void)
 	for (unsigned s = 0; s < image.segments; s++) {
 		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
 
-		if ((image.segment[s].at | image.segment[s].memory_size) & 7) {
-			printf("adsp: %u: a segment that does not begin and end at a multiple of eight bytes: not written\n", step);
+		if (image.segment[s].at & 7) {
+			printf("adsp: %u: a segment that does not begin at a multiple of eight bytes: not written\n", step);
 			ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
 			return false;
 		}
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+		for (uint32_t i = 0; i < ((image.segment[s].memory_size + 7) & ~7u); i += 8) {
 			to[i / 8] = segment_word(s, i);
 		}
 		written += image.segment[s].file_size;
@@ -1472,7 +1472,7 @@ step_image(void)
 	for (unsigned s = 0; s < image.segments; s++) {
 		volatile uint64_t *from = dsp_memory + image.segment[s].at / 8;
 
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+		for (uint32_t i = 0; i < ((image.segment[s].memory_size + 7) & ~7u); i += 8) {
 			wrong += from[i / 8] != segment_word(s, i);
 		}
 	}
