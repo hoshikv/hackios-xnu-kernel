@@ -1131,10 +1131,12 @@ static struct {
 static struct {
 	const uint8_t *header;
 	uint64_t header_size;
+	bool header_from_root;
 	struct {
 		uint32_t at, paddr;
 		uint32_t file_size, memory_size;
 		const uint8_t *file;
+		bool from_root;
 	} segment[MAX_SEGMENTS];
 	unsigned segments;
 	uint32_t size;
@@ -1410,19 +1412,36 @@ static void link_stop(void);
 static void
 dtb_forget(void)
 {
-	if (dtb_image.header != NULL) {
+	if (dtb_image.header != NULL && dtb_image.header_from_root) {
 		void *data = (void *)(uintptr_t)dtb_image.header;
 
 		kfree_data(data, dtb_image.header_size);
 	}
 	for (unsigned s = 0; s < dtb_image.segments; s++) {
-		if (dtb_image.segment[s].file != NULL) {
+		if (dtb_image.segment[s].file != NULL && dtb_image.segment[s].from_root) {
 			void *data = (void *)(uintptr_t)dtb_image.segment[s].file;
 
 			kfree_data(data, dtb_image.segment[s].file_size);
 		}
 	}
 	bzero(&dtb_image, sizeof(dtb_image));
+}
+
+/* A DTB file: first in the small image, where ADSP=1 userland/build.sh puts fw-audio/, then /fw on the root. */
+static const uint8_t *
+dtb_file(const char *name, uint64_t *size, bool *from_root)
+{
+	const uint8_t *data = redwood_image_file("fw", name, size, NULL);
+
+	if (data != NULL) {
+		*from_root = false;
+		return data;
+	}
+	data = root_file(name, size);
+	if (data != NULL) {
+		*from_root = true;
+	}
+	return data;
 }
 
 /*
@@ -1444,9 +1463,10 @@ dtb_load(void)
 	bool ok = false;
 
 	dtb_forget();
-	header = root_file("adsp_dtb.mdt", &size);
+	header = dtb_file("adsp_dtb.mdt", &size, &dtb_image.header_from_root);
 	if (header == NULL) {
-		printf("adsp: %u: no /fw/adsp_dtb.mdt: starting the audio DSP without its device tree\n", step);
+		printf("adsp: %u: no fw/adsp_dtb.mdt in the small image nor on the root: starting the audio DSP without its "
+		    "device tree\n", step);
 		return true;
 	}
 	dtb_image.header = header;
@@ -1480,7 +1500,8 @@ dtb_load(void)
 		}
 		snprintf(name, sizeof(name), "adsp_dtb.b%02u", i);
 		if (segment.file_size != 0) {
-			dtb_image.segment[dtb_image.segments].file = root_file(name, &file_size);
+			dtb_image.segment[dtb_image.segments].file = dtb_file(name, &file_size,
+			    &dtb_image.segment[dtb_image.segments].from_root);
 			if (dtb_image.segment[dtb_image.segments].file == NULL) {
 				goto fail;
 			}
