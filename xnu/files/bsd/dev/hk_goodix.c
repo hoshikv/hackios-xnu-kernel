@@ -32,6 +32,7 @@
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
+#include <pexpert/device_tree.h>
 #include <pexpert/pexpert.h>
 #include <sys/hk_input.h>
 #include <sys/systm.h>
@@ -43,6 +44,10 @@ extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t thread_terminate(thread_t thread);
 
 static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
+static vm_offset_t tlmm_phys = 0x0f100000UL;    /* redwood */
+static vm_offset_t se_phys = 0x00a94000UL;      /* redwood's touch serial engine */
+static vm_offset_t rsc_phys = 0x18220000UL;
+static vm_offset_t cmd_db_phys = 0x80860000UL;
 
 static inline uint32_t
 rd(vm_offset_t address)
@@ -77,16 +82,47 @@ sleep_ms(uint32_t ms)
 #define PULL_NONE               0
 #define PULL_UP                 3
 
-#define PIN_MISO                52
-#define PIN_MOSI                53
-#define PIN_CLK                 54
-#define PIN_CS                  55
-#define PIN_INT                 81      /* low = the chip has a report */
-#define PIN_RESET               105     /* low = in reset */
-#define PIN_AVDD                107     /* high = analog supply on */
-#define PIN_FOCALTECH_ID        68      /* FocalTech if this reads 0 ... */
-#define PIN_GOODIX_ID           96      /* ... and this reads 1 (sm8350-kernel-OKX convention) */
+static unsigned PIN_MISO = 52;
+static unsigned PIN_MOSI = 53;
+static unsigned PIN_CLK = 54;
+static unsigned PIN_CS = 55;
+static unsigned PIN_INT = 81;           /* low = the chip has a report */
+static unsigned PIN_RESET = 105;        /* low = in reset */
+static unsigned PIN_AVDD = 107;         /* high = analog supply on */
+static unsigned PIN_FOCALTECH_ID = 68;  /* FocalTech if this reads 0 ... */
+static unsigned PIN_GOODIX_ID = 96;     /* ... and this reads 1 (sm8350-kernel-OKX convention) */
 #define PIN_FUNCTION_SPI        1       /* "qup15" */
+
+static bool board_peridot;
+static uint32_t touch_stage = 8;        /* boot-arg touch_stage=N: stop after step N (bring-up only) */
+
+/* The loader writes the platform name into /arm-io/device_type; peridot has its own wiring. */
+static void
+board_detect(void)
+{
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	board_peridot = false;
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess &&
+	    size >= 7 && memcmp(prop, "peridot", 7) == 0) {
+		board_peridot = true;
+		PIN_MISO = 16;
+		PIN_MOSI = 17;
+		PIN_CLK = 18;
+		PIN_CS = 19;
+		PIN_INT = 129;
+		PIN_RESET = 128;
+		tlmm_phys = 0x0f100000UL;       /* Cliffs TLMM: tile offset 0x100000 */
+		se_phys = 0x00a90000UL;         /* SE4: spi@a90000 */
+		rsc_phys = 0x17a20000UL;        /* apps RSC drv@2 */
+		cmd_db_phys = 0x81c60000UL;     /* aop_cmd_db_region */
+	}
+	printf("goodix: board %s: pins miso/mosi/clk/cs %u/%u/%u/%u, interrupt %u, reset %u\n",
+	    board_peridot ? "peridot" : "redwood", PIN_MISO, PIN_MOSI, PIN_CLK, PIN_CS, PIN_INT, PIN_RESET);
+}
 
 static void
 gpio_configure(unsigned pin, unsigned function, unsigned pull, unsigned ma, bool output)
@@ -119,19 +155,33 @@ gpio_output(unsigned pin, bool high, unsigned pull, unsigned ma)
 #define CMD_DB_SIZE             0x20000UL
 #define RSC_PHYS                0x18220000UL    /* the application processor's "DRV 2" */
 #define RSC_SIZE                0x10000UL
-#define TCS(reg)                (rsc + 0xd00 + (reg))           /* command slot set 0, an "active" one */
+/*
+ * qcom,tcs-config pairs are <type count>; peridot lists ACTIVE 3 first, so the
+ * active TCSes are ids 0..2 and SLEEP starts at 3 (redwood also uses id 0).
+ * Each TCS is 672 (0x2a0) bytes apart from tcs_base.
+ */
+#define TCS_ID                  0
+#define TCS(reg)                (rsc + 0xd00 + 672 * TCS_ID + (reg))
+#define TCS_COMMON(reg)         (rsc + 0xd00 + (reg))   /* IRQ enable/status/clear, one bit per TCS */
 #define TCS_IRQ_ENABLE          0x00
 #define TCS_IRQ_STATUS          0x04
 #define TCS_IRQ_CLEAR           0x08
-#define TCS_WAIT_FOR_COMPLETION 0x10
-#define TCS_CONTROL             0x14
+/*
+ * Cliffs (peridot) reports RPMH RSC v3.0: per-TCS registers move to 0x20..
+ * and commands are 24 bytes apart.  Redwood keeps the v2.7 layout.
+ * See rpmh_rsc_reg_offsets_ver_3_0[] in drivers/soc/qcom/rpmh-rsc.c.
+ */
+#define RSC_V3_0                (board_peridot)
+#define TCS_CMD_STRIDE          (RSC_V3_0 ? 24 : 20)
+#define TCS_WAIT_FOR_COMPLETION (RSC_V3_0 ? 0x20 : 0x10)
+#define TCS_CONTROL             (RSC_V3_0 ? 0x24 : 0x14)
 #define TCS_CONTROL_ENABLE      (1u << 16)
 #define TCS_CONTROL_TRIGGER     (1u << 24)
-#define TCS_STATUS              0x18            /* 0 while busy */
-#define TCS_CMD_ENABLE          0x1c
-#define TCS_CMD_MSGID(n)        (0x30 + 20 * (n))
-#define TCS_CMD_ADDR(n)         (0x34 + 20 * (n))
-#define TCS_CMD_DATA(n)         (0x38 + 20 * (n))
+#define TCS_STATUS              (RSC_V3_0 ? 0x28 : 0x18)       /* 0 while busy */
+#define TCS_CMD_ENABLE          (RSC_V3_0 ? 0x2c : 0x1c)
+#define TCS_CMD_MSGID(n)        ((RSC_V3_0 ? 0x34 : 0x30) + TCS_CMD_STRIDE * (n))
+#define TCS_CMD_ADDR(n)         (TCS_CMD_MSGID(n) + 4)
+#define TCS_CMD_DATA(n)         (TCS_CMD_MSGID(n) + 8)
 #define MSGID_WRITE_4_BYTES     0x10008
 #define MSGID_RESPONSE          0x100
 
@@ -190,12 +240,12 @@ static bool
 rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
 {
 	for (int i = 0; i < 2000; i++) {
-		if ((rd(TCS(reg)) & mask) == value) {
+		if ((rd(TCS_COMMON(reg)) & mask) == value) {
 			return true;
 		}
 		sleep_us(100);
 	}
-	printf("goodix: RPMh: timeout waiting for %s (register %#x = %#x)\n", what, reg, rd(TCS(reg)));
+	printf("goodix: RPMh: timeout waiting for %s (register %#x = %#x)\n", what, reg, rd(TCS_COMMON(reg)));
 	return false;
 }
 
@@ -203,20 +253,20 @@ rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
 static bool
 rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 {
-	uint32_t irq_enable = rd(TCS(TCS_IRQ_ENABLE));
+	uint32_t irq_enable = rd(TCS_COMMON(TCS_IRQ_ENABLE));
+	uint32_t irq_bit = 1u << TCS_ID;
 	bool done;
 
-	/* the slot set must be idle, and switched off the way the hardware wants it: trigger, then enable */
-	for (int i = 0; rd(TCS(TCS_STATUS)) == 0; i++) {
-		if (i > 2000) {
-			printf("goodix: RPMh: the command slots stay busy\n");
-			return false;
-		}
-		sleep_us(100);
-	}
+	/*
+	 * Do not gate on TCS_STATUS: an idle/disabled TCS reads 0, the same as a busy one.
+	 * Linux clears the stale command enables and triggers; the IRQ status bit is the
+	 * completion signal (rpmh_rsc_send_data in drivers/soc/qcom/rpmh-rsc.c).
+	 */
+	wr(TCS(TCS_CMD_ENABLE), 0);
+	wr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
-	wr(TCS(TCS_IRQ_CLEAR), 1);
+	wr(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
 	for (unsigned i = 0; i < count; i++) {
 		wr(TCS(TCS_CMD_MSGID(i)), MSGID_WRITE_4_BYTES | MSGID_RESPONSE);
 		wr(TCS(TCS_CMD_ADDR(i)), address[i]);
@@ -224,40 +274,76 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 	}
 	wr(TCS(TCS_WAIT_FOR_COMPLETION), (1u << count) - 1);
 	wr(TCS(TCS_CMD_ENABLE), (1u << count) - 1);
-	wr(TCS(TCS_IRQ_ENABLE), irq_enable | 1);        /* the status bit follows the enable; the interrupt itself stays masked */
+	wr(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable | irq_bit);   /* status follows the enable; the GIC interrupt stays masked */
 	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE);
 	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
 
-	done = rpmh_wait(TCS_IRQ_STATUS, 1, 1, "the request");
+	done = rpmh_wait(TCS_IRQ_STATUS, irq_bit, irq_bit, "the request");
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
 	wr(TCS(TCS_CMD_ENABLE), 0);
 	wr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
-	wr(TCS(TCS_IRQ_CLEAR), 1);
-	wr(TCS(TCS_IRQ_ENABLE), irq_enable);
+	wr(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
+	wr(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable);
 	return done;
 }
 
-/* The chip's I/O supply: 1.8 V from LDO2 of the PM8350C ("ldoc2"). Nothing else is connected to it. */
 static bool
-io_supply_on(void)
+rpmh_maps(void)
 {
-	uint32_t base = rpmh_address("ldoc2");
+	if (rsc == 0) {
+		rsc = ml_io_map(rsc_phys, RSC_SIZE);
+	}
+	if (cmd_db == 0) {
+		cmd_db = ml_io_map_wcomb(cmd_db_phys, CMD_DB_SIZE);
+	}
+	if (rsc == 0 || cmd_db == 0) {
+		printf("goodix: cannot map RPMh (rsc %#lx, cmd-db %#lx)\n", (unsigned long)rsc, (unsigned long)cmd_db);
+		return false;
+	}
+	return true;
+}
+
+static bool
+regulator_on(const char *name, uint32_t millivolts)
+{
+	uint32_t base = rpmh_address(name);
 	uint32_t address[3] = { base + VRM_VOLTAGE, base + VRM_ENABLE, base + VRM_MODE };
-	uint32_t data[3] = { 1800, 1, VRM_MODE_LDO_HPM };
+	uint32_t data[3] = { millivolts, 1, VRM_MODE_LDO_HPM };
 
 	/* addresses of regulators ("VRM") have 4 in bits 19:16; anything else is not what we are looking for */
 	if (base == 0 || (base >> 16 & 0xf) != 4) {
-		printf("goodix: RPMh: no regulator \"ldoc2\" (address %#x)\n", base);
+		printf("goodix: RPMh: no regulator \"%s\" (address %#x)\n", name, base);
 		return false;
 	}
-	printf("goodix: RPMh: ldoc2 is at %#x; slot status %#x, control %#x, irq enable %#x status %#x\n", base,
-	    rd(TCS(TCS_STATUS)), rd(TCS(TCS_CONTROL)), rd(TCS(TCS_IRQ_ENABLE)), rd(TCS(TCS_IRQ_STATUS)));
+	printf("goodix: RPMh: rsc %#x id %#x config %#x; %s at %#x; tcs status %#x, control %#x, irq enable %#x status %#x\n",
+	    rsc, rd(rsc), rd(rsc + 0x0c), name, base, rd(TCS(TCS_STATUS)), rd(TCS(TCS_CONTROL)),
+	    rd(TCS_COMMON(TCS_IRQ_ENABLE)), rd(TCS_COMMON(TCS_IRQ_STATUS)));
 	if (!rpmh_write(address, data, 3)) {
 		return false;
 	}
-	printf("goodix: I/O supply on (1.8 V)\n");
+	printf("goodix: %s on (%u mV)\n", name, millivolts);
 	return true;
+}
+
+/*
+ * Redwood: 1.8 V from LDO2 of the PM8350C ("ldoc2").
+ * Peridot: IOVDD ldob23 1.8 V first, then AVDD ldob13 3.3 V (peridot.dts, vendor order).
+ */
+static bool
+io_supply_on(void)
+{
+	if (board_peridot) {
+		if (!rpmh_maps()) {
+			return false;
+		}
+		if (!regulator_on("ldob23", 1800)) {
+			return false;
+		}
+		sleep_ms(3);
+		return regulator_on("ldob13", 3300);
+	}
+	return regulator_on("ldoc2", 1800);
 }
 
 /* ---- clocks (GCC) -------------------------------------------------------------------------------- */
@@ -557,7 +643,7 @@ geni_transfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
 
 /* ---- SPI by hand, on the same pins ----------------------------------------------------------------- */
 
-static unsigned bitbang_in = PIN_MISO, bitbang_out = PIN_MOSI;
+static unsigned bitbang_in, bitbang_out;
 
 static void
 bitbang_init(void)
@@ -603,7 +689,6 @@ static bool (*spi_transfer)(const uint8_t *tx, uint8_t *rx, uint32_t length);
 
 static uint8_t spi_tx[8 + GOODIX_MAX_READ], spi_rx[8 + GOODIX_MAX_READ];
 static uint32_t touch_address, command_address;
-static const char *report_rate = "240";        /* what the status line says (touch_rate=480) */
 static uint32_t max_x = 10800, max_y = 24000;   /* the device tree's; the chip may say otherwise */
 
 static bool
@@ -674,9 +759,29 @@ static void
 touch_reset(void)
 {
 	gpio_set(PIN_RESET, false);
-	sleep_ms(2);
+	sleep_ms(board_peridot ? 15 : 2);
 	gpio_set(PIN_RESET, true);
 	sleep_ms(100);
+}
+
+/* Berlin-D expects the eight-byte confirmation at 0x10000 before its firmware answers. */
+static bool
+goodix_confirm(void)
+{
+	static const uint8_t pattern[8] = { 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa };
+	uint8_t answer[sizeof(pattern)];
+
+	for (int attempt = 0; attempt < 3; attempt++) {
+		hk_tl("tl: goodix confirm try %d\n", attempt);
+		if (goodix_write(0x10000, pattern, sizeof(pattern)) &&
+		    goodix_read(0x10000, answer, sizeof(answer)) && memcmp(answer, pattern, sizeof(pattern)) == 0) {
+			hk_tl("tl: goodix confirm ok\n");
+			return true;
+		}
+		sleep_ms(5);
+	}
+	hk_tl("tl: goodix confirm failed\n");
+	return false;
 }
 
 /* Is the chip there and running its firmware? Finds where it keeps the touch report. */
@@ -687,6 +792,7 @@ goodix_probe(bool verbose)
 	uint8_t version[28];
 	uint32_t length, offset;
 
+	hk_tl("tl: goodix probe\n");
 	if (!goodix_read(GOODIX_FW_VERSION, version, sizeof(version))) {
 		return false;
 	}
@@ -781,7 +887,7 @@ goodix_command(uint8_t command, uint8_t data)
 	return false;
 }
 
-/* What has been seen so far: said once a minute, so that the end of the log always tells. */
+/* Counters for diagnostics; nothing here is printed in the steady state. */
 static struct {
 	uint32_t polls, reports, touches, bad, last_x, last_y;
 } seen;
@@ -789,33 +895,29 @@ static struct {
 /* Which fingers were down in the last report, and where. */
 static struct {
 	bool down, seen;
-	uint32_t x, y;
+	uint32_t x, y;                  /* scaled for the input queue */
+	uint32_t raw_x, raw_y;          /* as the chip reported them, for the log */
 } contact[GOODIX_MAX_TOUCHES];
 static uint32_t flip;           /* boot-arg touch_flip: 1 = mirror left-right, 2 = mirror top-bottom */
 
 static void
 goodix_report(const uint8_t *touches, uint32_t count)
 {
-	static unsigned shown;
-
 	for (int i = 0; i < GOODIX_MAX_TOUCHES; i++) {
 		contact[i].seen = false;
 	}
 	for (uint32_t i = 0; i < count; i++) {
 		const uint8_t *t = touches + 8 * i;
 		uint32_t id = t[0] >> 4, kind = t[0] & 0xf;
-		uint32_t x = le16(t + 2), y = le16(t + 4);
+		uint32_t raw_x = le16(t + 2), raw_y = le16(t + 4);
+		uint32_t x = raw_x, y = raw_y;
 
 		if (id >= GOODIX_MAX_TOUCHES || kind == 1 || kind == 3) {       /* 1 and 3: a stylus */
 			continue;
 		}
-		if (shown < 40) {
-			shown++;
-			printf("goodix: finger %u at %u, %u (of %u x %u)\n", id, x, y, max_x, max_y);
-		}
 		seen.touches++;
-		seen.last_x = x;
-		seen.last_y = y;
+		seen.last_x = raw_x;
+		seen.last_y = raw_y;
 		x = x >= max_x ? 65535 : x * 65535 / max_x;
 		y = y >= max_y ? 65535 : y * 65535 / max_y;
 		if (flip & 1) {
@@ -826,6 +928,7 @@ goodix_report(const uint8_t *touches, uint32_t count)
 		}
 		contact[id].seen = true;
 		if (!contact[id].down) {
+			hk_tl("tl: touch down %u %u %u\n", id, raw_x, raw_y);
 			hk_touch_post(HK_TOUCH_DOWN, id, x, y);
 		} else if (contact[id].x != x || contact[id].y != y) {
 			hk_touch_post(HK_TOUCH_MOVE, id, x, y);
@@ -833,11 +936,14 @@ goodix_report(const uint8_t *touches, uint32_t count)
 		contact[id].down = true;
 		contact[id].x = x;
 		contact[id].y = y;
+		contact[id].raw_x = raw_x;
+		contact[id].raw_y = raw_y;
 	}
 	/* a finger that is no longer in the report has lifted */
 	for (uint32_t id = 0; id < GOODIX_MAX_TOUCHES; id++) {
 		if (contact[id].down && !contact[id].seen) {
 			contact[id].down = false;
+			hk_tl("tl: touch up %u %u %u\n", id, contact[id].raw_x, contact[id].raw_y);
 			hk_touch_post(HK_TOUCH_UP, id, contact[id].x, contact[id].y);
 		}
 	}
@@ -876,6 +982,11 @@ goodix_poll(void)
 		if ((report[2] & 0xf) == GOODIX_REQUEST_RESET || report[2] == GOODIX_REQUEST_RESET) {
 			printf("goodix: the chip asks to be reset\n");
 			touch_reset();
+			if (!goodix_confirm()) {
+				hk_tl("tl: touch reset: confirm failed\n");
+			} else if (!goodix_probe(false)) {
+				hk_tl("tl: touch reset: probe failed\n");
+			}
 		}
 		return;
 	}
@@ -1303,6 +1414,11 @@ static enum touch_chip touch_chip;
 static enum touch_chip
 touch_chip_detect(void)
 {
+	if (board_peridot) {
+		/* The previous peridot bring-up identified a Goodix Berlin-D GT9916R on SE4. */
+		printf("goodix: peridot uses the Goodix Berlin-D GT9916R\n");
+		return TOUCH_GOODIX;
+	}
 	gpio_configure(PIN_FOCALTECH_ID, 0, PULL_NONE, 2, false);
 	gpio_configure(PIN_GOODIX_ID, 0, PULL_NONE, 2, false);
 	if (gpio_get(PIN_GOODIX_ID) && !gpio_get(PIN_FOCALTECH_ID)) {
@@ -1318,6 +1434,10 @@ chip_probe(bool verbose)
 		return focaltech_probe(verbose);
 	}
 	touch_reset();
+	if (board_peridot && !goodix_confirm()) {
+		printf("goodix: peridot Berlin-D did not confirm (0x10000); check rails and reset\n");
+		return false;
+	}
 	return goodix_probe(verbose);
 }
 
@@ -1336,24 +1456,53 @@ chip_poll(void)
 static void
 show_state(const char *when)
 {
-	printf("goodix: %s: votes %#x, clocks %#x %#x %#x, rate cfg %#x dfs %#x; pins cs/clk/mosi/miso cfg %#x %#x %#x %#x,"
-	    " reset %#x/%u, int %#x/%u, avdd %#x/%u, straps %u %u\n", when, rd(GCC_VOTE), rd(GCC_QUP1_M_AHB_CBCR),
+	unsigned avdd_cfg = 0, avdd_io = 0, ft_id = 0, gx_id = 0;
+
+	/*
+	 * Peridot has no redwood AVDD strap and no id straps; its touch is known.  Do not read those
+	 * pins there: they are not part of the peridot wiring, and a stray read is not worth a hang.
+	 */
+	if (!board_peridot) {
+		avdd_cfg = rd(GPIO_CFG(PIN_AVDD));
+		avdd_io = rd(GPIO_IO(PIN_AVDD));
+		ft_id = gpio_get(PIN_FOCALTECH_ID);
+		gx_id = gpio_get(PIN_GOODIX_ID);
+	}
+	printf("goodix: %s: board %s, votes %#x, clocks %#x %#x %#x, rate cfg %#x dfs %#x; pins cs/clk/mosi/miso cfg %#x %#x %#x %#x,"
+	    " reset %#x/%u, int %#x/%u, avdd %#x/%u, straps %u %u\n", when,
+	    board_peridot ? "peridot" : "redwood", rd(GCC_VOTE), rd(GCC_QUP1_M_AHB_CBCR),
 	    rd(GCC_QUP1_S_AHB_CBCR), rd(GCC_QUP1_SE5_CBCR), rd(GCC_QUP1_SE5_CFG), rd(GCC_QUP1_SE5_DFSR), rd(GPIO_CFG(PIN_CS)),
 	    rd(GPIO_CFG(PIN_CLK)), rd(GPIO_CFG(PIN_MOSI)), rd(GPIO_CFG(PIN_MISO)), rd(GPIO_CFG(PIN_RESET)),
-	    rd(GPIO_IO(PIN_RESET)), rd(GPIO_CFG(PIN_INT)), rd(GPIO_IO(PIN_INT)), rd(GPIO_CFG(PIN_AVDD)), rd(GPIO_IO(PIN_AVDD)),
-	    gpio_get(68), gpio_get(96));
+	    rd(GPIO_IO(PIN_RESET)), rd(GPIO_CFG(PIN_INT)), rd(GPIO_IO(PIN_INT)), avdd_cfg, avdd_io, gx_id, ft_id);
 }
 
 /* Power the chip up from nothing, in the vendor driver's order. */
-static void
+static bool
 power_on(void)
 {
+	uint32_t no_rpmh = 0;
+
 	gpio_output(PIN_RESET, false, PULL_UP, 8);
 	gpio_configure(PIN_INT, 0, PULL_UP, 8, false);
-	io_supply_on();
-	sleep_ms(3);
-	gpio_output(PIN_AVDD, true, PULL_NONE, 2);
-	sleep_ms(15);
+	PE_parse_boot_argn("touch_no_rpmh", &no_rpmh, sizeof(no_rpmh));
+	if (!no_rpmh && !io_supply_on()) {
+		return false;
+	}
+	if (no_rpmh) {
+		printf("goodix: touch_no_rpmh=1: leaving the supplies as the loader set them\n");
+	}
+	if (board_peridot) {
+		sleep_ms(10);
+		gpio_set(PIN_RESET, false);
+		sleep_ms(15);
+		gpio_set(PIN_RESET, true);
+		sleep_ms(100);
+	} else {
+		sleep_ms(3);
+		gpio_output(PIN_AVDD, true, PULL_NONE, 2);
+		sleep_ms(15);
+	}
+	return true;
 }
 
 static void
@@ -1376,13 +1525,29 @@ bring_up(void)
 {
 	const char *problem = "its clocks cannot be turned on";
 
-	show_state("as found");
+	if (board_peridot) {
+		max_x = 19520;          /* 1220 x 16, the panel's units in the touch report */
+		max_y = 43400;          /* 2712 x 16 */
+	}
+	if (board_peridot) {
+		printf("goodix: peridot: skipping the redwood debug state and id straps\n");
+	} else {
+		show_state("as found");
+	}
 	touch_chip = touch_chip_detect();
-	printf("goodix: ID gpio96=%u gpio68=%u: selected %s\n", gpio_get(PIN_GOODIX_ID),
-	    gpio_get(PIN_FOCALTECH_ID), chip_name());
-	power_on();
+	if (board_peridot) {
+		printf("goodix: selected %s\n", chip_name());
+	} else {
+		printf("goodix: ID gpio96=%u gpio68=%u: selected %s\n", gpio_get(PIN_GOODIX_ID),
+		    gpio_get(PIN_FOCALTECH_ID), chip_name());
+	}
+	if (!power_on()) {
+		printf("goodix: the touch supplies did not come on\n");
+		return false;
+	}
+	hk_tl("tl: bring_up: power_on done\n");
 
-	if (clocks_on()) {
+	if (!board_peridot && clocks_on()) {
 		printf("goodix: serial engine: firmware %#x, interface %#x, parameters %#x, source clock %u Hz (select %u)\n",
 		    rd(GENI_FW_REVISION_RO), rd(GENI_IF_DISABLE_RO), rd(SE_HW_PARAM_0), se_source_hz, se_clock_select);
 		uint32_t spi_hz = 1000000;
@@ -1399,10 +1564,13 @@ bring_up(void)
 		use_engine_pins();
 		spi_transfer = geni_transfer;
 		show_state("powered, on the serial engine");
+		hk_tl("tl: bring_up: chip_probe on the engine\n");
 		if (chip_probe(true)) {
 			return true;
 		}
 		printf("goodix: %s did not answer through the serial engine; trying the pins by hand\n", chip_name());
+	} else if (board_peridot) {
+		printf("goodix: peridot: driving the SPI pins by hand (no GENI clock setup)\n");
 	} else {
 		printf("goodix: %s; driving the pins by hand\n", problem);
 	}
@@ -1413,6 +1581,7 @@ bring_up(void)
 		bitbang_in = attempt == 0 ? PIN_MISO : PIN_MOSI;
 		bitbang_out = attempt == 0 ? PIN_MOSI : PIN_MISO;
 		bitbang_init();
+		hk_tl("tl: bring_up: chip_probe by hand %d\n", attempt);
 		if (chip_probe(true)) {
 			printf("goodix: %s answers on pins driven by hand (data in on gpio%u)\n", chip_name(), bitbang_in);
 			return true;
@@ -1435,21 +1604,80 @@ static void
 goodix_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	unsigned idle = 0, idle_looks;
-	uint32_t poll_us = 8000, latency = 0, reads = 0;
-	uint64_t before = 0, reading = 0;
+	uint32_t poll_us = 8000, latency = 0;
+	uint64_t before = 0;
 
 	PE_parse_boot_argn("touch_poll_us", &poll_us, sizeof(poll_us));
 	PE_parse_boot_argn("touch_lat", &latency, sizeof(latency));
+	PE_parse_boot_argn("touch_stage", &touch_stage, sizeof(touch_stage));
 	if (poll_us < 250 || poll_us > 100000) {
 		poll_us = 8000;
 	}
 	idle_looks = 80000 / poll_us;   /* a report read every 80 ms even with the line high, in case it is missed */
 
-	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
+	printf("goodix: touch_stage=%u: thread entered\n", touch_stage);
+	hk_tl("tl: touch thread enter (stage %u)\n", touch_stage);
+	if (touch_stage <= 1) {
+		printf("goodix: touch_stage=1 done (thread only)\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	tlmm = ml_io_map(tlmm_phys, TLMM_SIZE);
+	printf("goodix: touch_stage=%u: tlmm %#lx mapped from %#lx\n", touch_stage, (unsigned long)tlmm,
+	    (unsigned long)tlmm_phys);
+	hk_tl("tl: tlmm %#lx\n", (unsigned long)tlmm);
+	if (touch_stage == 2) {
+		printf("goodix: touch_stage=2 done (tlmm map)\n");
+		thread_terminate(current_thread());
+		return;
+	}
 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
-	se = ml_io_map(SE_PHYS, SE_SIZE);
-	rsc = ml_io_map(RSC_PHYS, RSC_SIZE);
-	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
+	se = ml_io_map(se_phys, SE_SIZE);
+	printf("goodix: touch_stage=%u: gcc %#lx se %#lx mapped from %#lx\n", touch_stage, (unsigned long)gcc,
+	    (unsigned long)se, (unsigned long)se_phys);
+	hk_tl("tl: maps tlmm=%#lx gcc=%#lx se=%#lx\n", (unsigned long)tlmm, (unsigned long)gcc,
+	    (unsigned long)se);
+	if (touch_stage == 3) {
+		printf("goodix: touch_stage=3 done (all maps)\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_stage == 4) {
+		printf("goodix: touch pins cfg cs=%#x clk=%#x mosi=%#x miso=%#x reset=%#x int=%#x\n",
+		    rd(GPIO_CFG(PIN_CS)), rd(GPIO_CFG(PIN_CLK)), rd(GPIO_CFG(PIN_MOSI)),
+		    rd(GPIO_CFG(PIN_MISO)), rd(GPIO_CFG(PIN_RESET)), rd(GPIO_CFG(PIN_INT)));
+		printf("goodix: strap pins g96=%u g68=%u, avdd g107 cfg=%#x io=%#x\n",
+		    gpio_get(PIN_GOODIX_ID), gpio_get(PIN_FOCALTECH_ID), rd(GPIO_CFG(PIN_AVDD)),
+		    rd(GPIO_IO(PIN_AVDD)));
+		printf("goodix: touch_stage=4 done (pin reads)\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_stage == 5) {
+		show_state("stage 5");
+		printf("goodix: touch_stage=5 done (show_state)\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_stage == 6) {
+		bool ok = power_on();
+
+		printf("goodix: touch_stage=6 done (power_on=%d, reset cfg=%#x int cfg=%#x)\n", ok,
+		    rd(GPIO_CFG(PIN_RESET)), rd(GPIO_CFG(PIN_INT)));
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_stage == 7) {
+		bool ok;
+
+		bitbang_init();
+		spi_transfer = bitbang_transfer;
+		printf("goodix: touch_stage=7: pins driven by hand, confirming\n");
+		ok = goodix_confirm();
+		printf("goodix: touch_stage=7 done (confirm=%d)\n", ok);
+		thread_terminate(current_thread());
+		return;
+	}
 
 	if (!bring_up()) {
 		printf("goodix: no %s touch screen\n", chip_name());
@@ -1464,12 +1692,11 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 		if (PE_parse_boot_argn("touch_rate", &rate, sizeof(rate)) && rate == 480 && touch_chip == TOUCH_GOODIX) {
 			bool done = goodix_command(GOODIX_CMD_HIGH_RATE, 1);
 
-			report_rate = done ? "480 (acknowledged)" : "240 (480 NOT ACKNOWLEDGED)";
 			printf("goodix: reports 480 times a second (command %#x at %#x): %s\n", GOODIX_CMD_HIGH_RATE, command_address,
 			    done ? "acknowledged" : "NOT ACKNOWLEDGED");
 		}
 	}
-	for (unsigned tick = 1;; tick++) {
+	for (;;) {
 		uint64_t looked = micros_now(), read_at;
 
 		/* the interrupt line is low while a report waits; look anyway every 80 ms in case it is missed */
@@ -1477,24 +1704,14 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 			idle = 0;
 			chip_poll();
 			read_at = micros_now();
-			reads++;
-			reading += read_at - looked;
 			if (latency) {
 				hk_tl("tl: c before %llu seen %llu read %llu\n", before, looked, read_at);
 			}
 		} else if (++idle >= idle_looks) {
 			idle = 0;
 			chip_poll();
-			reads++;
-			reading += micros_now() - looked;
 		}
 		before = looked;
-		if (tick % (60 * (1000000 / poll_us)) == 0) {
-			printf("%s: so far %u reports in %u looks (%u bad), %u finger positions, the last at %u, %u; "
-			    "interrupt line %s; a report takes %llu us to read; the line looked at every %u us, reports %s a second\n",
-			    chip_name(), seen.reports, seen.polls, seen.bad, seen.touches, seen.last_x, seen.last_y,
-			    gpio_get(PIN_INT) ? "high" : "low", reads ? reading / reads : 0, poll_us, report_rate);
-		}
 		sleep_us(poll_us);
 	}
 }
@@ -1502,14 +1719,29 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 void
 hk_goodix_init(void)
 {
+	static bool started;
 	uint32_t enabled = 0;
 	thread_t thread;
 
-	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled)) || !enabled) {
+	if (started) {
 		return;
 	}
+	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled))) {
+		enabled = 1;    /* peridot: the panel is on by default; touchscreen=0 turns it off */
+	}
+	if (!enabled) {
+		return;
+	}
+	started = true;
+	hk_tl("tl: goodix init: before board_detect\n");
+	printf("goodix: init: before board_detect\n");
+	board_detect();
+	hk_tl("tl: goodix init: board_detect done\n");
+	printf("goodix: init: board_detect done\n");
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
 	if (kernel_thread_start(goodix_thread, NULL, &thread) == KERN_SUCCESS) {
+		hk_tl("tl: goodix init: thread started\n");
+		printf("goodix: init: thread started\n");
 		thread_deallocate(thread);
 	}
 }

@@ -51,12 +51,14 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <machine/machine_routines.h>
+#include <pexpert/device_tree.h>
 #include <pexpert/pexpert.h>
 #include <miscfs/devfs/devfs.h>
 #include <sys/conf.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <sys/hk_audio.h>
+#include "redwood_haptic_fw.h"
 #include <sys/hk_input.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -131,15 +133,33 @@ wait_ms(uint32_t ms)
 #define CFG_PULL_UP             3
 #define CFG_OUTPUT              (1u << 9)
 
-#define PIN_SDA                 36      /* the serial engine's first pin is the data line, the second the clock */
-#define PIN_SCL                 37
-#define PIN_RESET               35
-#define PIN_INT                 18
+static unsigned PIN_SDA = 36;           /* the serial engine's first pin is the data line, the second the clock */
+static unsigned PIN_SCL = 37;
+static unsigned PIN_RESET = 35;
+static unsigned PIN_INT = 18;
+
+/* The loader writes the platform name into /arm-io/device_type. */
+static void
+board_detect(void)
+{
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess &&
+	    size >= 7 && memcmp(prop, "peridot", 7) == 0) {
+		PIN_SDA = 52;           /* qupv3_se0_i2c: gpio52 data, gpio53 clock */
+		PIN_SCL = 53;
+		PIN_RESET = 30;         /* awinic_gpio_reset */
+		PIN_INT = 54;           /* awinic_gpio_int */
+	}
+}
 
 static void
 show_pins(void)
 {
-	static const struct {
+	const struct {
 		unsigned pin;
 		const char *what;
 	} pins[] = { { PIN_SDA, "I2C data" }, { PIN_SCL, "I2C clock" }, { PIN_RESET, "reset" }, { PIN_INT, "interrupt" } };
@@ -562,15 +582,12 @@ wait_standby(unsigned ms)
 static bool
 load_waveforms(void)
 {
-	uint64_t size = 0;
-	const uint8_t *file = hk_wifi_file("aw8697_haptic.bin", &size);
+	const uint8_t *file = redwood_haptic_waveforms;
+	uint64_t size = sizeof(redwood_haptic_waveforms);
 	uint32_t sum = 0, base, length;
 	uint8_t address[2], back[64];
 
-	if (file == NULL || size < 8) {
-		say("haptic: no aw8697_haptic.bin in fw/ of the small image (fw-haptic/ when it is built)\n");
-		return false;
-	}
+	say("haptic: peridot's waveforms, built in: %llu bytes\n", size);
 	for (uint64_t i = 2; i < size; i++) {
 		sum += file[i];
 	}
@@ -937,6 +954,7 @@ serve(void)
 static void
 haptic_thread(__unused void *parameter, __unused wait_result_t result)
 {
+	board_detect();
 	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
 	say("haptic: level %u: %s\n", level, level == 1 ? "a look, reading only" : level == 2 ? "the reset released, registers read" :
 	    level == 3 ? "the chip configured and its waveforms loaded, nothing played" : level == 4 ? "one effect played" :
@@ -979,7 +997,10 @@ hk_haptic_init(void)
 {
 	thread_t thread;
 
-	if (!PE_parse_boot_argn("haptic", &level, sizeof(level)) || level == 0) {
+	if (!PE_parse_boot_argn("haptic", &level, sizeof(level))) {
+		level = 5;      /* peridot: the motor for iOS by default; haptic=0 turns it off */
+	}
+	if (level == 0) {
 		return;
 	}
 	if (level > 5) {

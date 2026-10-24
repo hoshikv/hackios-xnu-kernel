@@ -90,6 +90,9 @@
  * registers/adreno/a6xx{,_gmu}.xml, drivers/iommu/arm/arm-smmu/arm-smmu.h, drivers/soc/qcom/
  * cmd-db.c, drivers/firmware/qcom/qcom_scm{,-smc}.c, drivers/soc/qcom/mdt_loader.c. The phone's
  * vendor kernel agrees on every offset used here, and is the only source for the frequency counter.
+ *
+ * Peridot (SM8635, Cliffs) port in progress: steps 1 to 6 below carry this phone's GPU block
+ * addresses. The later steps still describe redwood and are not attempted until they are ported.
  */
 #include <kern/clock.h>
 #include <libkern/libkern.h>
@@ -105,7 +108,8 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
-static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
+#define PERIDOT_GPU_STEPS       15u             /* steps 1 to 15 are ported to the Cliffs GPU block; later ones are not */
+static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
@@ -286,14 +290,14 @@ static struct block gcc = { "gcc", 0x00100000, 0x80000 };
 #define GCC_PLL_VOTE            0x52000         /* bit 15: gcc_gpu_gpll0_clk_src (600 MHz), bit 16: ..._div_clk_src (300 MHz) */
 #define GCC_PLL_VOTE_GPU_DIV    (1u << 16)
 #define GCC_GPU_CFG_AHB_CBCR    0x71004
-#define GCC_GPU_MEMNOC_GFX_CBCR 0x7100c
+#define GCC_GPU_MEMNOC_GFX_CBCR 0x71010
 #define GCC_GPU_SNOC_DVM_GFX_CBCR 0x71018
-#define GCC_DDRSS_GPU_AXI_CBCR  0x71154
+#define GCC_DDRSS_GPU_AXI_CBCR  0x7115c
 #define CBCR_ENABLE             (1u << 0)       /* a clock's control register: on */
 #define CBCR_OFF                (1u << 31)      /* ... and whether it is in fact off */
 
-/* dt: reserved-memory cmd_db@80860000: the boot loader's list of what RPMh can switch (cmd-db.c) */
-#define CMD_DB_PHYS             0x80860000UL
+/* dt: reserved-memory aop_cmd_db_region@81c60000: the boot loader's list of what RPMh can switch (cmd-db.c) */
+#define CMD_DB_PHYS             0x81c60000UL
 #define CMD_DB_SIZE             0x20000UL
 
 struct cmd_db_slave {
@@ -395,22 +399,21 @@ step_outside(void)
 	get(&gcc, "gpu_snoc_dvm_gfx", GCC_GPU_SNOC_DVM_GFX_CBCR);
 	get(&gcc, "ddrss_gpu_axi", GCC_DDRSS_GPU_AXI_CBCR);
 
-	announce("look up the GPU's supply rails in the boot loader's list of RPMh resources (memory at 0x80860000)");
-	show_rpmh_resource("gfx.lvl");          /* the 3D core's own rail (dt: VDD_GFX_LEVEL, PM8350C S7) */
-	show_rpmh_resource("cx.lvl");           /* the rail of the CX half, shared with most of the SoC */
-	show_rpmh_resource("mx.lvl");           /* memories */
+	announce("look up the GPU's supply rails in the boot loader's list of RPMh resources (memory at 0x81c60000)");
+	show_rpmh_resource("gfx.lvl");          /* the 3D core's own rail (dt: PMXR2230 S4) */
+	show_rpmh_resource("cx.lvl");           /* the rail of the CX half (dt: PM_V6C S1) */
+	show_rpmh_resource("mx.lvl");           /* memories (dt: PM_V8 S8) */
 	return true;
 }
 
 /* ---- step 2: the fuses ------------------------------------------------------------------------------- */
 
 /*
- * dt: qfprom@780000 with gpu_speed_bin@1e9 (two bytes, 8 bits from bit 5) and gpu_gaming_bin@1f5
- * (bit 5). Linux has the same cell 0x4000 further on, in the error-corrected copy of the fuses
- * (sc7280.dtsi: efuse@784000), and that is the copy it reads under this hypervisor on sibling
- * boards; so that one first.
+ * dt: qfprom@221c8000 (qcom,cliffs-qfprom), 0x1000 long. Peridot's device tree names no GPU
+ * speed-bin cell, so this step reads nothing and leaves speed_bin 0 for the steps that would
+ * need it (none of 1 to 6 do).
  */
-static struct block qfprom = { "qfprom", 0x00780000, 0x7000 };
+static struct block qfprom = { "qfprom", 0x221c8000, 0x1000 };
 #define QFPROM_CORRECTED        0x4000
 #define QFPROM_GPU_SPEED_BIN    0x1e9
 #define QFPROM_GPU_GAMING_BIN   0x1f5
@@ -434,6 +437,9 @@ static bool
 step_fuses(void)
 {
 	uint32_t bin, gaming;
+
+	announce("peridot's GPU fuse cell is not known yet: step 2 is skipped");
+	return true;
 
 	announce("read the GPU's fuses in the error-corrected copy (0x784000), which Linux reads");
 	bin = get8(&qfprom, "speed bin, low", QFPROM_CORRECTED + QFPROM_GPU_SPEED_BIN);
@@ -459,25 +465,23 @@ step_fuses(void)
  * registers answer only while gcc_gpu_cfg_ahb runs, which Linux turns on for good when it
  * starts (gcc-sc7280.c, the end of the probe function).
  */
-static struct block gpucc = { "gpucc", 0x03d90000, 0x9000 };
-#define GPUCC_PLL0_MODE         0x0000          /* the 3D core's PLL: bit 31 locked, bit 0 output on; +4: times 19.2 MHz */
-#define GPUCC_PLL1_MODE         0x0100          /* a 500 MHz PLL, an alternative source for the GMU's clock */
-#define GPUCC_CXO_AON_CBCR      0x1004
-#define GPUCC_GX_SW_RESET       0x1008          /* dt: gpu_gx_sw_reset */
-#define GPUCC_GX_GDSCR          0x100c          /* dt: gpu_gx_gdsc, the 3D core's power switch: the GMU's to operate */
-#define GPUCC_GX_GMU_CBCR       0x1064
-#define GPUCC_CX_GDSCR          0x106c          /* dt: gpu_cx_gdsc */
-#define GPUCC_AHB_CBCR          0x1078          /* gpu_cc_ahb_clk: the register bus inside the GPU block */
-#define GPUCC_CX_GMU_CBCR       0x1098          /* gpu_cc_cx_gmu_clk: the GMU */
-#define GPUCC_CXO_CBCR          0x109c          /* gpu_cc_cxo_clk: the crystal, for the GMU's timers */
-#define GPUCC_GMU_RCGR          0x1120          /* gpu_cc_gmu_clk_src: +0 command, +4 source and divider */
-#define GPUCC_CB_CBCR           0x1170          /* gpu_cc_cb_clk: Linux keeps it on always */
-#define GPUCC_HUB_AON_CBCR      0x1178          /* gpu_cc_hub_aon_clk */
-#define GPUCC_HUB_RCGR          0x117c          /* gpu_cc_hub_clk_src */
-#define GPUCC_HUB_CX_INT_CBCR   0x1204          /* gpu_cc_hub_cx_int_clk */
-#define GPUCC_CX_HW_CTRL        0x1540          /* dt: gpu_cx_hw_ctrl: bit 31 is where the vendor's driver sees CX come on */
-#define GPUCC_GX_DOMAIN_MISC    0x158c          /* dt: gpu_gx_domain_addr */
-#define GPUCC_SMMU_VOTE_CBCR    0x5000          /* gpu_cc_hlos1_vote_gpu_smmu_clk: our vote for the SMMU's clock */
+static struct block gpucc = { "gpucc", 0x03d90000, 0xa000 };
+#define GPUCC_PLL0_MODE         0x0000          /* gpu_cc_pll0: the 3D core's PLL, offsets from gpucc-cliffs.c */
+#define GPUCC_PLL1_MODE         0x1000          /* gpu_cc_pll1: the GMU's alternative source */
+#define GPUCC_CXO_AON_CBCR      0x9004          /* gpu_cc_cxo_aon_clk: kept on by Linux */
+#define GPUCC_GX_SW_RESET       0x9030          /* gpu_cc_gx_bcr: the 3D core's block reset */
+#define GPUCC_GX_GDSCR          0x9034          /* dt: gpu_cc_gx_gdsc, the 3D core's power switch */
+#define GPUCC_CX_GDSCR          0x908c          /* dt: gpu_cc_cx_gdsc */
+#define GPUCC_CX_HW_CTRL        0x90a0          /* dt: the hw-ctrl-addr page; bit 31 is CX's status */
+#define GPUCC_AHB_CBCR          0x90c8          /* gpu_cc_ahb_clk: the register bus inside the GPU block */
+#define GPUCC_CX_GMU_CBCR       0x90e4          /* gpu_cc_cx_gmu_clk: the GMU */
+#define GPUCC_CXO_CBCR          0x90f0          /* gpu_cc_cxo_clk: the crystal, for the GMU's timers */
+#define GPUCC_HUB_CX_INT_CBCR   0x90f4          /* gpu_cc_hub_cx_int_clk */
+#define GPUCC_MEMNOC_GFX_CBCR   0x90fc          /* gpu_cc_memnoc_gfx_clk */
+#define GPUCC_GMU_RCGR          0x9168          /* gpu_cc_gmu_clk_src: +0 command, +4 source and divider */
+#define GPUCC_HUB_AON_CBCR      0x9198          /* gpu_cc_hub_aon_clk */
+#define GPUCC_HUB_RCGR          0x919c          /* gpu_cc_hub_clk_src */
+#define GPUCC_SMMU_VOTE_CBCR    0x7000          /* gpu_cc_hlos1_vote_gpu_smmu_clk: our vote for the SMMU's clock */
 
 #define GDSC_SW_COLLAPSE        (1u << 0)       /* a power switch's control register (gdsc.c): off, by software */
 #define GDSC_HW_CONTROL         (1u << 1)       /* something else than software operates it */
@@ -499,7 +503,6 @@ step_gpucc(void)
 	get(&gpucc, "cx_hw_ctrl", GPUCC_CX_HW_CTRL);
 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
 	get(&gpucc, "gx_sw_reset", GPUCC_GX_SW_RESET);
-	get(&gpucc, "gx_domain_misc", GPUCC_GX_DOMAIN_MISC);
 	get(&gpucc, "pll0 mode", GPUCC_PLL0_MODE);
 	get(&gpucc, "pll0 multiplier", GPUCC_PLL0_MODE + 4);
 	get(&gpucc, "pll1 mode", GPUCC_PLL1_MODE);
@@ -509,11 +512,10 @@ step_gpucc(void)
 	get(&gpucc, "hub_clk_src command", GPUCC_HUB_RCGR);
 	get(&gpucc, "hub_clk_src source", GPUCC_HUB_RCGR + 4);
 	get(&gpucc, "cxo_aon", GPUCC_CXO_AON_CBCR);
-	get(&gpucc, "gx_gmu", GPUCC_GX_GMU_CBCR);
 	get(&gpucc, "ahb", GPUCC_AHB_CBCR);
 	get(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR);
 	get(&gpucc, "cxo", GPUCC_CXO_CBCR);
-	get(&gpucc, "cb", GPUCC_CB_CBCR);
+	get(&gpucc, "memnoc_gfx", GPUCC_MEMNOC_GFX_CBCR);
 	get(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR);
 	get(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR);
 	get(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR);
@@ -542,8 +544,6 @@ cx_is_on(void)
 	return (rd(gpucc.base + GPUCC_CX_GDSCR) | rd(gpucc.base + GPUCC_CX_HW_CTRL)) & GDSC_POWER_ON;
 }
 
-static void stale_stop(void);
-
 /*
  * The switch hangs on the rail "cx.lvl", which is up for as long as the SoC runs at all; the
  * vendor's driver (gdsc-regulator.c) clears the collapse bit and waits for bit 31 of the register
@@ -562,25 +562,23 @@ step_cx_power(void)
 	get(&gpucc, "cx_hw_ctrl", GPUCC_CX_HW_CTRL);
 	if (cx_is_on()) {
 		/*
-		 * A kernel that kept the GPU for the system to use (adreno_keep) leaves it running when
-		 * its run ends. What it left -- the GMU's processor, the 3D core's power, the GMU's
-		 * votes in RPMh, the SMMU's contexts pointing into memory that is somebody else's now --
-		 * is taken down as gpu_block_stop() would have, and the start is from nothing.
+		 * Peridot's early steps do not have a stop path yet: an earlier run in this loader
+		 * session leaves CX on, and the next run goes on with it. The 3D core must still be off.
 		 */
-		printf("adreno: %u: CX is on already: an earlier kernel left the GPU block running; stopping it first\n", step);
-		stale_stop();
-		if (cx_is_on()) {
-			printf("adreno: %u: CX stays on: going on with it as it is\n", step);
-			return true;
+		printf("adreno: %u: CX is on already: going on with it as it is\n", step);
+		if (rd(gpucc.base + GPUCC_GX_GDSCR) & GDSC_POWER_ON) {
+			printf("adreno: %u: THE 3D CORE HAS POWER ALREADY, left on by an earlier kernel: not usable until the "
+			    "phone is restarted\n", step);
+			return false;
 		}
-		gdscr = rd(gpucc.base + GPUCC_CX_GDSCR);
+		return true;
 	}
 	if (gdscr & GDSC_HW_CONTROL) {
 		printf("adreno: %u: the switch is under hardware control: not ours to operate\n", step);
 		return false;
 	}
 	put(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR, gdscr & ~GDSC_SW_COLLAPSE);
-	for (int i = 0; i < 500 && !cx_is_on(); i++) {
+	for (int i = 0; i < 5000 && !cx_is_on(); i++) {         /* up to 500 ms: gen7's CX rail is slower than redwood's */
 		sleep_us(100);
 	}
 	get(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR);
@@ -644,10 +642,9 @@ clock_source(const char *name, uint32_t rcgr, uint32_t source)
 static bool measure_clocks(void);
 
 /*
- * The clocks the device tree gives the GMU and the SMMU, at the rates both the vendor's driver
- * and Linux bring the GMU up with: 200 MHz for the GMU, 150 MHz for the "hub" (a6xx_gmu_resume).
- * Both come from the 300 MHz tap of the global 600 MHz PLL, which runs anyway: no PLL of the
- * GPU's own has to be started.
+ * The clocks the device tree gives the GMU and the SMMU: on gen7_11_0 the GMU runs at 200 MHz
+ * and the "hub" at 200 MHz (adreno-gpulist.h). Both come from the 300 MHz tap of the global
+ * 600 MHz PLL, which runs anyway: no PLL of the GPU's own has to be started.
  */
 static bool
 step_clocks(void)
@@ -667,19 +664,19 @@ step_clocks(void)
 		return false;
 	}
 
-	announce("in the GPU's clock controller: the GMU's clock to 200 MHz, the hub's to 150 MHz");
+	announce("in the GPU's clock controller: the GMU's clock to 200 MHz, the hub's to 200 MHz");
 	if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3)) ||       /* 300 MHz / 1.5 */
-	    !clock_source("hub_clk_src", GPUCC_HUB_RCGR, RCG_GPLL0_DIV(4))) {       /* 300 MHz / 2 */
+	    !clock_source("hub_clk_src", GPUCC_HUB_RCGR, RCG_GPLL0_DIV(3))) {       /* 300 MHz / 1.5 */
 		return false;
 	}
 
 	announce("in the GPU's clock controller: the clocks of the GMU and of the SMMU on");
-	if (!clock_on(&gpucc, "cb", GPUCC_CB_CBCR, false) ||
-	    !clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
+	if (!clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
 	    !clock_on(&gpucc, "ahb", GPUCC_AHB_CBCR, false) ||
 	    !clock_on(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR, true) ||
 	    !clock_on(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR, true) ||
 	    !clock_on(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR, true) ||
+	    !clock_on(&gpucc, "memnoc_gfx", GPUCC_MEMNOC_GFX_CBCR, false) ||
 	    !clock_on(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR, false)) {
 		return false;
 	}
@@ -695,31 +692,30 @@ step_clocks(void)
  * result as "clk_measure"; registers, selections and procedure are its debugcc-yupik.c and
  * clk-debug.c (mainline Linux has no counterpart).
  */
-#define GCC_DEBUG_MUX           0x62000         /* [9:0] which clock goes to the counter */
-#define GCC_DEBUG_MUX_GPUCC     0x146           /* ... the debug output of the GPU's clock controller */
-#define GCC_DEBUG_DIV           0x62004         /* [3:0] divider - 1; both controllers divide by 2 */
-#define GCC_DEBUG_CBCR          0x62008
-#define GCC_XO_DIV4_CBCR        0x6200c         /* the counter's time base: the crystal / 4, 4.8 MHz */
-#define GCC_MEASURE_CTL         0x62038         /* [19:0] how many ticks of the time base to count for */
+#define GCC_DEBUG_MUX           0x62024         /* [9:0] which clock goes to the counter */
+#define GCC_DEBUG_MUX_GPUCC     0x17d           /* ... the debug output of the GPU's clock controller */
+#define GCC_DEBUG_DIV           0x62000         /* [3:0] divider - 1; both controllers divide by 2 */
+#define GCC_DEBUG_CBCR          0x62004
+#define GCC_XO_DIV4_CBCR        0x62008         /* the counter's time base: the crystal / 4, 4.8 MHz */
+#define GCC_MEASURE_CTL         0x62048         /* [19:0] how many ticks of the time base to count for */
 #define MEASURE_RUN             (1u << 20)
 #define MEASURE_CLEAR           (1u << 21)
-#define GCC_MEASURE_STATUS      0x6203c         /* [24:0] the count */
+#define GCC_MEASURE_STATUS      0x6204c         /* [24:0] the count */
 #define MEASURE_DONE            (1u << 25)
 #define MEASURE_BRIEF           0x1000          /* ticks: a millisecond */
 #define MEASURE_FULL            0x20000         /* 27 ms */
 #define MEASURE_FAILED          0xffffffffu
-#define GPUCC_DEBUG_DIV         0x10fc
-#define GPUCC_DEBUG_CBCR        0x1100
-#define GPUCC_DEBUG_MUX         0x1568          /* [7:0] which of the GPU's clocks */
+#define GPUCC_DEBUG_DIV         0x9140
+#define GPUCC_DEBUG_CBCR        0x9144
+#define GPUCC_DEBUG_MUX         0x9564          /* [7:0] which of the GPU's clocks */
 #define GPUCC_DEBUG_CXO_AON     0x0b
-#define GPUCC_DEBUG_GX_GFX3D    0x0d            /* the 3D core's own clock */
-#define GPUCC_DEBUG_GX_GMU      0x11
-#define GPUCC_DEBUG_AHB         0x12
-#define GPUCC_DEBUG_CX_GMU      0x1a
-#define GPUCC_DEBUG_CXO         0x1b
-#define GPUCC_DEBUG_HUB_CX_INT  0x1c
-#define GPUCC_DEBUG_CB          0x26
-#define GPUCC_DEBUG_HUB_AON     0x27
+#define GPUCC_DEBUG_GX_GFX3D    0x0e            /* the 3D core's own clock */
+#define GPUCC_DEBUG_GX_GMU      0x11            /* redwood only; later steps are not ported */
+#define GPUCC_DEBUG_AHB         0x16
+#define GPUCC_DEBUG_CX_GMU      0x1d
+#define GPUCC_DEBUG_CXO         0x1e
+#define GPUCC_DEBUG_HUB_CX_INT  0x1f
+#define GPUCC_DEBUG_HUB_AON     0x2d
 
 /* Let the counter run for so many ticks of its time base; what it counted of the clock on its input. */
 static uint32_t
@@ -804,14 +800,14 @@ measure_clocks(void)
 		const char *name;
 		uint32_t select;
 	} clocks[] = {
-		{ "cx_gmu (200 MHz was asked for)", GPUCC_DEBUG_CX_GMU }, { "hub_cx_int (from 150 MHz)", GPUCC_DEBUG_HUB_CX_INT },
-		{ "hub_aon", GPUCC_DEBUG_HUB_AON }, { "cb", GPUCC_DEBUG_CB }, { "cxo_aon", GPUCC_DEBUG_CXO_AON },
-		{ "gx_gmu (should be off)", GPUCC_DEBUG_GX_GMU }, { "ahb, THE ONE IN QUESTION,", GPUCC_DEBUG_AHB },
+		{ "cx_gmu (200 MHz was asked for)", GPUCC_DEBUG_CX_GMU }, { "hub_cx_int (from 200 MHz)", GPUCC_DEBUG_HUB_CX_INT },
+		{ "hub_aon", GPUCC_DEBUG_HUB_AON }, { "cxo_aon", GPUCC_DEBUG_CXO_AON },
+		{ "gx_gfx3d (should be off)", GPUCC_DEBUG_GX_GFX3D }, { "ahb, THE ONE IN QUESTION,", GPUCC_DEBUG_AHB },
 	};
 	uint32_t hz, ahb_hz = MEASURE_FAILED;
 
-	announce("measure the GPU block's clocks with the SoC's frequency counter (debug registers at gcc 0x162000.., "
-	    "gpucc 0x3d910fc, 0x3d91100, 0x3d91568)");
+	announce("measure the GPU block's clocks with the SoC's frequency counter (debug registers at gcc 0x62000.., "
+	    "gpucc 0x3d99140, 0x3d99144, 0x3d99564)");
 	hz = measure(GPUCC_DEBUG_CXO);
 	if (hz == MEASURE_FAILED) {
 		printf("adreno: %u: the counter did not finish: it cannot be used as it is set up here\n", step);
@@ -885,27 +881,30 @@ cx_ready(void)
 /* ---- step 6: the first words from the GPU block ------------------------------------------------------- */
 
 /*
- * dt: qcom,gmu "kgsl_gmu_reg" at 0x3d6a000, 0x34000 long. Offsets in a6xx_gmu.xml are in words.
+ * dt: qcom,gmu "gmu" at 0x3d68000, 0x37000 long. Gen7 offsets in gen7_reg.h are absolute words
+ * from the kgsl base 0x3d00000, not from the GMU block: 0x1f800 is 0x3d7e000.
  */
-static struct block gmu = { "gmu", 0x03d6a000, 0x34000 };
-#define GMU_WORD(n)             (4u * (n))
-#define GMU_DTCM                GMU_WORD(0x1c00)        /* the processor's 16K of data memory (its code: 0x0c00) */
-#define GMU_DTCM_VERSIONS       GMU_WORD(0x1c00 + 0xff8) /* five words where loaded firmware carries its versions */
-#define GMU_CM3_SYSRESET        GMU_WORD(0x5000)        /* 1: the processor is held in reset */
-#define GMU_CM3_BOOT_CONFIG     GMU_WORD(0x5001)
-#define GMU_CM3_FW_INIT_RESULT  GMU_WORD(0x501c)        /* 0xbabeface once firmware has started */
-#define GMU_CM3_CFG             GMU_WORD(0x502d)
-#define GMU_ALWAYS_ON_COUNTER_L GMU_WORD(0x5088)        /* counts the 19.2 MHz crystal */
-#define GMU_ALWAYS_ON_COUNTER_H GMU_WORD(0x5089)
-#define GMU_SPTPRAC_PWR_CLK_STATUS GMU_WORD(0x50d0)     /* bit 6: the 3D core has no power, bit 7: no clock */
-#define GMU_RPMH_POWER_STATE    GMU_WORD(0x50ec)
-#define GMU_HFI_CTRL_STATUS     GMU_WORD(0x5180)
-#define GMU_HFI_VERSION_INFO    GMU_WORD(0x5181)
-#define GMU_GENERAL_7           GMU_WORD(0x51cc)
-#define GMU_AO_HOST_INTERRUPT_STATUS GMU_WORD(0x9305)
-#define GMU_RSCC_CONTROL_ACK    GMU_WORD(0x9308)
-#define GMU_AO_GPU_CX_BUSY_STATUS GMU_WORD(0x930c)
-#define GMU_AHB_FENCE_STATUS    GMU_WORD(0x9313)
+static struct block gmu = { "gmu", 0x03d68000, 0x37000 };
+#define GMU_WORD(n)             (4u * (n) - 0x68000u)
+#define GMU_DTCM                GMU_WORD(0x1c400)       /* gen7: 16K data TCM after the 16K instruction TCM */
+#define GMU_DTCM_VERSIONS       GMU_WORD(0x1c400 + 0xff8)
+#define GMU_CM3_SYSRESET        GMU_WORD(0x1f800)       /* 1: the processor is held in reset */
+#define GMU_CM3_BOOT_CONFIG     GMU_WORD(0x1f801)
+#define GMU_CM3_FW_INIT_RESULT  GMU_WORD(0x1f81c)       /* 0xbabeface once firmware has started */
+#define GMU_CM3_CFG             GMU_WORD(0x1f82d)
+#define GMU_ALWAYS_ON_COUNTER_L GMU_WORD(0x1f880)       /* counts the 19.2 MHz crystal */
+#define GMU_ALWAYS_ON_COUNTER_H GMU_WORD(0x1f881)
+#define GMU_SPTPRAC_PWR_CLK_STATUS GMU_WORD(0x50d0)     /* redwood only; not read in the early steps */
+#define GMU_RPMH_POWER_STATE    GMU_WORD(0x1f8ec)
+#define GMU_HFI_CTRL_STATUS     GMU_WORD(0x1f980)
+#define GMU_HFI_VERSION_INFO    GMU_WORD(0x5181)        /* redwood only */
+#define GMU_GENERAL_7           GMU_WORD(0x1f9cc)
+#define GMU_AO_HOST_INTERRUPT_STATUS GMU_WORD(0x23b05)
+#define GMU_RSCC_CONTROL_ACK    GMU_WORD(0x23b08)
+#define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x23b07)
+#define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x23b10)
+#define GMU_AO_GPU_CX_BUSY_STATUS GMU_WORD(0x23b0c)
+#define GMU_AHB_FENCE_STATUS    GMU_WORD(0x23b13)
 
 /*
  * dt: qcom,kgsl-3d0 "kgsl_3d0_reg_memory" at 0x3d00000 is the 3D core, and without power (the GMU
@@ -930,16 +929,14 @@ step_first_words(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read registers of the GMU (0x3d6a000): the first words from the GPU block itself");
+	announce("read registers of the GMU (0x3d68000): the first words from the GPU block itself");
 	get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET);
 	get(&gmu, "cm3_boot_config", GMU_CM3_BOOT_CONFIG);
 	get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT);
 	get(&gmu, "cm3_cfg", GMU_CM3_CFG);
 	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
-	get(&gmu, "hfi_version_info", GMU_HFI_VERSION_INFO);
 	get(&gmu, "general_7", GMU_GENERAL_7);
 	get(&gmu, "rpmh_power_state", GMU_RPMH_POWER_STATE);
-	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);
 	get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
 	get(&gmu, "ao_gpu_cx_busy_status", GMU_AO_GPU_CX_BUSY_STATUS);
 	get(&gmu, "ahb_fence_status", GMU_AHB_FENCE_STATUS);
@@ -953,10 +950,6 @@ step_first_words(void)
 	hz = nanos ? (uint32_t)((uint64_t)hz * NSEC_PER_SEC / nanos) : 0;
 	printf("adreno: %u: the GMU's counter counts at %u Hz: %s\n", step, hz, hz > 18000000 && hz < 20500000 ?
 	    "the 19.2 MHz crystal: THE GPU BLOCK IS ALIVE" : "not the crystal's 19.2 MHz (firmware may start it): see the rest");
-	for (uint32_t i = 0; i < 5; i++) {
-		get(&gmu, "dtcm, where firmware has its versions", GMU_DTCM_VERSIONS + 4 * i);
-	}
-
 	announce("read the GPU's bus interface (0x3d0f000) and the CX odds and ends (0x3d9e000)");
 	get(&gbif, "scache_cntl0", GBIF_SCACHE_CNTL0);
 	get(&gbif, "halt", GBIF_HALT);
@@ -969,11 +962,11 @@ step_first_words(void)
 /* ---- step 7: the GMU's channel to RPMh ----------------------------------------------------------------- */
 
 /*
- * dt: qcom,kgsl-3d0 "rscc" at 0x3de0000: the same kind of command slots through which this
- * kernel asks RPMh for the touch screen's supply, but the GMU's own; through them its firmware
- * raises the 3D core's rail. Offsets in words: a6xx_gmu.xml, domain A6XX_RSCC.
+ * dt: qcom,kgsl-3d0 "rscc" at 0x3d50000 on cliffs: the same kind of command slots through
+ * which this kernel asks RPMh for the touch screen's supply, but the GMU's own; through them
+ * its firmware raises the 3D core's rail. Offsets in words: gen7_reg.h, GEN7_RSCC_*.
  */
-static struct block rscc = { "rscc", 0x03de0000, 0x2000 };
+static struct block rscc = { "rscc", 0x03d50000, 0x10000 };
 #define RSCC_RSC_STATUS0_DRV0   (4 * 0x004)
 #define RSCC_PDC_SLAVE_ID_DRV0  (4 * 0x00b)
 #define RSCC_SEQ_BUSY_DRV0      (4 * 0x101)
@@ -1015,7 +1008,7 @@ step_rscc(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read the GMU's RPMh channel (0x3de0000)");
+	announce("read the GMU's RPMh channel (0x3d50000)");
 	get(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0);
 	get(&rscc, "pdc_slave_id_drv0", RSCC_PDC_SLAVE_ID_DRV0);
 	get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0);
@@ -1028,12 +1021,12 @@ step_rscc(void)
 /* ---- steps 8 and 9: the SMMU --------------------------------------------------------------------------- */
 
 /*
- * dt: kgsl-smmu@3da0000 (qcom,qsmmu-v500: an Arm MMU-500), 0x20000 long, with "qcom,skip-init":
+ * dt: kgsl-smmu@3da0000 (qcom,qsmmu-v500: an Arm MMU-500), 0x40000 long on cliffs, with "qcom,skip-init":
  * the vendor's driver leaves its stream table as it finds it. Its streams (dt: qcom,kgsl-iommu
  * and qcom,gmu, "iommus"): 0 the GPU, 1 its low-priority twin, 2 secure content, 5 the GMU.
  * The global registers here are the ones the hypervisor imitates; offsets: arm-smmu.h.
  */
-static struct block smmu = { "smmu", 0x03da0000, 0x20000 };
+static struct block smmu = { "smmu", 0x03da0000, 0x40000 };
 #define SMMU_SCR0               0x000
 #define SMMU_IDR0               0x020           /* [7:0] stream match registers */
 #define SMMU_IDR1               0x024           /* bit 31: 64K pages, [30:28] log2(pages)-1, [7:0] translation contexts */
@@ -1138,11 +1131,11 @@ step_gmu_memory(void)
 		return false;
 	}
 	announce("hold the GMU's processor in reset, write two words into its data memory (0x3d71000), read them back");
-	if (get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT) == 0xbabeface) {
-		printf("adreno: %u: firmware is running in the GMU: leaving its memory alone\n", step);
+	if (get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET) != 1 ||
+	    get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT) != 0) {
+		printf("adreno: %u: firmware may be running in the GMU: leaving its memory alone\n", step);
 		return false;
 	}
-	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
 	get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET);
 	for (int i = 0; i < 2; i++) {
 		was[i] = get(&gmu, "dtcm", GMU_DTCM + 4 * i);
@@ -1228,6 +1221,7 @@ struct gpu_space {
 	const char *name;
 	uint32_t context;               /* which of the SMMU's */
 	uint32_t control;               /* bits of its control register besides the usual */
+	bool no_stream_table;           /* the hypervisor routes its stream to this context (the SMMU aperture call) */
 	uint32_t table_count;
 	uint64_t *root;
 	struct {
@@ -1455,12 +1449,15 @@ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
 		return false;
 	}
 	put(&smmu, "cb sctlr", context + SMMU_CB_SCTLR, SMMU_SCTLR_ON | space->control);
-	put(&smmu, "s2cr", SMMU_S2CR(match), space->context);
-	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream);
+	if (!space->no_stream_table) {
+		put(&smmu, "s2cr", SMMU_S2CR(match), space->context);
+		put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream);
+	}
 
 	/* the global ones are the hypervisor's to grant: see what it made of them */
-	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream) ||
-	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context ||
+	if ((!space->no_stream_table &&
+	    (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream) ||
+	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context)) ||
 	    (get(&smmu, "cbar", smmu_page + SMMU_CBAR(space->context)) & 0x30000) != (SMMU_CBAR_STAGE_1 & 0x30000) ||
 	    !(get(&smmu, "cb sctlr", context + SMMU_CB_SCTLR) & 1) ||
 	    get(&smmu, "cb ttbr0, low", context + SMMU_CB_TTBR0) != (uint32_t)root ||
@@ -1481,8 +1478,10 @@ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
 static void
 space_off(struct gpu_space *space, uint32_t match)
 {
-	put(&smmu, "smr", SMMU_SMR(match), 0);
-	put(&smmu, "s2cr", SMMU_S2CR(match), SMMU_S2CR_FAULT);
+	if (!space->no_stream_table) {
+		put(&smmu, "smr", SMMU_SMR(match), 0);
+		put(&smmu, "s2cr", SMMU_S2CR(match), SMMU_S2CR_FAULT);
+	}
 	put(&smmu, "cb sctlr", smmu_context(space) + SMMU_CB_SCTLR, 0);
 }
 
@@ -1545,6 +1544,44 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		}
 	}
 	printf("adreno: %u: TrustZone keeps saying the call was interrupted\n", step);
+	return -1;
+}
+
+/*
+ * The GPU SMMU's stream table is the hypervisor's on peridot: writes to SMR/S2CR
+ * abort. qcom_scm_kgsl_set_smmu_aperture asks it to send the GPU's streams
+ * through a context bank instead. SVC_MP, CP_SMMU_APERTURE_ID; four values:
+ * the aperture register in bits 8..15 and the context bank in bits 0..7.
+ */
+static int32_t
+smmu_aperture(uint32_t context)
+{
+	uint64_t function = SCM_64 | SCM_SIP | SCM_CALL(0x0c, 0x1b), session = 0;
+
+	printf("adreno: %u: about to ask TrustZone to send aperture %u's streams through SMMU context %u: smc %#llx\n", step,
+	    aperture_reg, context, function);
+	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx for aperture %u, SMMU context %u", step,
+	    function, aperture_reg, context);
+	hold(true);
+	for (int i = 0; i < 100; i++) {
+		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
+		register uint64_t x1 __asm__("x1") = 4;
+		register uint64_t x2 __asm__("x2") = 0xffff0000u | (aperture_reg & 0xff) << 8 | (context & 0xff);
+		register uint64_t x3 __asm__("x3") = 0xffffffffu;
+		register uint64_t x4 __asm__("x4") = 0xffffffffu;
+		register uint64_t x5 __asm__("x5") = 0xffffffffu;
+		register uint64_t x6 __asm__("x6") = session;
+		register uint64_t x7 __asm__("x7") = 0;
+
+		__asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3), "+r" (x4), "+r" (x5), "+r" (x6),
+		    "+r" (x7) : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+		session = x6;
+		if (x0 != SCM_INTERRUPTED) {
+			printf("adreno: %u: TrustZone returns %d for the SMMU aperture\n", step, (int32_t)x0);
+			return (int32_t)x0;
+		}
+	}
+	printf("adreno: %u: TrustZone keeps saying the aperture call was interrupted\n", step);
 	return -1;
 }
 
@@ -1628,49 +1665,87 @@ image_file(const char *directory, const char *name, uint64_t *size)
 }
 
 /*
- * The first of the three calls with which Linux has a zap shader loaded (mdt_loader.c:
- * qcom_mdt_pas_init, qcom_scm.c: qcom_scm_pas_init_image): TrustZone is given the image's header --
- * the ELF header and the block of hashes and certificates, which is all of the file a660_zap.mdt
- * -- and checks the signature. Nothing of the GPU is involved, so it can be asked now. The other
- * two (where the image will be, and "authenticate and start") need the 3D core powered.
- *
- * The header goes in memory of ours, page-aligned and in one piece. Qualcomm's note at that
- * call says that for these calls the hypervisor itself arranges TrustZone's access to the memory
- * ("creates SHM bridges on behalf of Linux"), and that TrustZone protects the memory while it
- * works: so it is not touched again here, and never freed.
+ * The gen7 zap shader is a Qualcomm .mbn: an ELF32 whose first program header is the
+ * metadata block (the ELF header and the table of program headers) and whose hash
+ * segment carries the signature. TrustZone's PAS init takes both in one page of ours,
+ * as the .mdt header did on redwood. The first program header therefore is not a
+ * segment to load, and the hash segment is the one whose flags say "hash".
  */
-/* The zap shader's header in a page of ours, as TrustZone wants it; where that page is in physical memory. */
+#define ZAP_FILE                "gen71100_zap.mbn"
+#define ZAP_HASH_FLAGS          2               /* bits 24..26 of p_flags */
+
+static uint32_t
+le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint16_t
+le16(const uint8_t *p)
+{
+	return (uint16_t)(p[0] | p[1] << 8);
+}
+
+/* The zap shader's metadata in a page of ours, as TrustZone wants it; where that page is in physical memory. */
 static bool
 zap_header(uint64_t *phys)
 {
-	const uint8_t *header;
+	const uint8_t *fw;
 	vm_offset_t page = 0;
-	uint64_t size = 0;
-	uint32_t segments, hashes;
+	uint64_t size = 0, header_bytes, hash_offset, hash_bytes;
+	uint32_t phoff, phent, phnum, hash = 0, i;
 
-	header = image_file("fw", "a660_zap.mdt", &size);
-	if (header == NULL) {
+	fw = image_file("fw", ZAP_FILE, &size);
+	if (fw == NULL) {
 		return false;
 	}
-	/* a 32-bit ELF: the count of segments at 44, the table of them at 52, 32 bytes each, the file size of one at +16 */
-	segments = size >= 52 + 2 * 32 ? header[44] | header[45] << 8 : 0;
-	if (memcmp(header, "\177ELF\1", 5) != 0 || segments < 2 || size > PAGE_SIZE) {
-		printf("adreno: %u: that is not such a header (%02x %02x %02x %02x, %u segments)\n", step, header[0], header[1],
-		    header[2], header[3], segments);
+	if (size < 52 || memcmp(fw, "\177ELF\1", 5) != 0) {
+		printf("adreno: %u: %s is not a 32-bit ELF (%02x %02x %02x %02x, %llu bytes)\n", step, ZAP_FILE, fw[0], fw[1],
+		    fw[2], fw[3], size);
 		return false;
 	}
-	memcpy(&hashes, header + 52 + 32 + 16, sizeof(hashes));
-	printf("adreno: %u: an ELF header of %u segments, %u bytes with its table, then %llu bytes; by the table, %u of hashes\n",
-	    step, segments, 52 + 32 * segments, size - (52 + 32 * segments), hashes);
-	if (52 + 32 * segments + (uint64_t)hashes != size) {
-		printf("adreno: %u: the file is not the header followed by the hashes alone: not what TrustZone takes\n", step);
+#define ZAP_PH(field)   le32(fw + phoff + i * 32 + (field) * 4)
+	phoff = le32(fw + 28);
+	phent = le16(fw + 42);
+	phnum = le16(fw + 44);
+	if (phent != 32 || phnum < 2 || phnum > 16 || phoff + (uint64_t)phnum * 32 > size) {
+		printf("adreno: %u: %s has %u program headers of %u bytes at %#x: not what TrustZone takes\n", step, ZAP_FILE,
+		    phnum, phent, phoff);
 		return false;
 	}
+	i = 0;
+	if (ZAP_PH(0) == 1) {
+		printf("adreno: %u: %s starts with a loadable segment, not the metadata block\n", step, ZAP_FILE);
+		return false;
+	}
+	for (i = 1; i < phnum && !hash; i++) {
+		if (((ZAP_PH(6) >> 24) & 7) == ZAP_HASH_FLAGS) {
+			hash = i;
+		}
+	}
+	if (!hash) {
+		printf("adreno: %u: %s has no hash segment\n", step, ZAP_FILE);
+		return false;
+	}
+	i = 0;
+	header_bytes = ZAP_PH(4);
+	i = hash;
+	hash_offset = ZAP_PH(1);
+	hash_bytes = ZAP_PH(4);
+#undef ZAP_PH
+	if (header_bytes > size || hash_offset + hash_bytes > size || header_bytes + hash_bytes > PAGE_SIZE) {
+		printf("adreno: %u: %s: %llu bytes of header and %llu of hashes do not fit one page\n", step, ZAP_FILE,
+		    header_bytes, hash_bytes);
+		return false;
+	}
+	printf("adreno: %u: %s: %llu bytes of header, %llu of hashes at %#llx\n", step, ZAP_FILE, header_bytes, hash_bytes,
+	    hash_offset);
 	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		printf("adreno: %u: no memory\n", step);
 		return false;
 	}
-	memcpy((void *)page, header, size);
+	memcpy((void *)page, fw, header_bytes);
+	memcpy((void *)(page + header_bytes), fw + hash_offset, hash_bytes);
 	to_memory(page, PAGE_SIZE);             /* TrustZone reads memory, not this processor's cache */
 	*phys = kvtophys(page);
 	return true;
@@ -1682,11 +1757,12 @@ step_zap_signature(void)
 	uint64_t header = 0, answer = ~0ull;
 	int32_t result;
 
-	announce("find the zap shader's header, fw/a660_zap.mdt, in the small image that came with the kernel");
+	announce("find the zap shader's metadata in the small image that came with the kernel, fw/" ZAP_FILE);
 	if (!zap_header(&header)) {
 		return false;
 	}
-	announce("hand the header to TrustZone to check its signature (image 13); a call that may be preempted, as Linux's is");
+	announce("hand the metadata to TrustZone to check the zap shader's signature (image 13); a call that may be "
+	    "preempted, as Linux's is");
 	result = scm("to take the zap shader's signature", SCM_64 | SCM_SIP | SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_GPU,
 	    header, 0, &answer);
 	if (result == 0 && answer == 0) {
@@ -1711,11 +1787,11 @@ step_zap_signature(void)
 #define GMU_ITCM_ADDRESS        0x00000000u
 #define GMU_DTCM_ADDRESS        0x10004000u     /* a6xx_gmu_fw_load: the 650 family's */
 #define GMU_TCM_SIZE            0x4000u
-#define GMU_LOG_ADDRESS         0x60002000u     /* after the two pages the firmware asks for at 0x60000000 */
+#define GMU_LOG_ADDRESS         0x60004000u     /* after the two pages the firmware asks for at 0x60000000 */
 #define GMU_LOG_SIZE            0x4000u
-#define GMU_HFI_ADDRESS         0x60006000u
+#define GMU_HFI_ADDRESS         0x60008000u
 #define GMU_STREAM              5
-#define GMU_MATCH               1               /* entry of the stream table; 0 is kept for the 3D core */
+#define GMU_MATCH               2               /* entry of the stream table; 0 and 1 are the 3D core's and its LPAC's */
 
 struct gmu_firmware_block {
 	uint32_t address, size, type, value;
@@ -1743,8 +1819,8 @@ step_gmu_space(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("find the GMU's firmware, fw/a660_gmu.bin, in the small image, and make the memory it asks for");
-	gmu_firmware = image_file("fw", "a660_gmu.bin", &gmu_firmware_size);
+	announce("find the GMU's firmware, fw/gen71100_gmu.bin, in the small image, and make the memory it asks for");
+	gmu_firmware = image_file("fw", "gen71100_gmu.bin", &gmu_firmware_size);
 	if (gmu_firmware == NULL) {
 		return false;
 	}
@@ -1774,17 +1850,22 @@ step_gmu_space(void)
 	}
 
 	announce("give the SMMU's context 1 these tables and send the GMU's requests (stream 5) through it: the first "
-	    "writes to the SMMU, the global ones (cbar, cba2r, s2cr, smr) through the hypervisor");
+	    "writes to the SMMU, the stream table itself through the hypervisor's aperture call");
 	if (!smmu_layout()) {
 		return false;
 	}
+	if (smmu_aperture(gmu_space.context) != 0) {
+		printf("adreno: %u: the hypervisor does not give the GMU its SMMU context\n", step);
+		return false;
+	}
+	gmu_space.no_stream_table = true;
 	gmu_space_is_on = true;         /* whatever of it has been written by the time something fails is taken back */
 	return space_on(&gmu_space, GMU_MATCH, GMU_STREAM);
 }
 
 /* ---- step 14: the GMU's firmware ----------------------------------------------------------------------- */
 
-#define GMU_ITCM                GMU_WORD(0x0c00)
+#define GMU_ITCM                GMU_WORD(0x1b400)
 
 static bool
 step_gmu_firmware(void)
@@ -1855,30 +1936,46 @@ step_gmu_firmware(void)
 
 /* ---- step 15: start the GMU ---------------------------------------------------------------------------- */
 
-#define GMU_ICACHE_CONFIG       GMU_WORD(0x4c00)
-#define GMU_DCACHE_CONFIG       GMU_WORD(0x4c01)
-#define GMU_SYS_BUS_CONFIG      GMU_WORD(0x4c0f)
-#define GMU_PWR_COL_INTER_FRAME_CTRL GMU_WORD(0x50c0)
-#define GMU_RPMH_CTRL           GMU_WORD(0x50e8)
-#define GMU_RPMH_CTRL_ALL       0xf11           /* the RPMh interface, and every vote the firmware may cast */
-#define GMU_CX_FAL_INTF         GMU_WORD(0x50f0)
-#define GMU_CX_FALNEXT_INTF     GMU_WORD(0x50f1)
-#define GMU_PWR_COL_CP_MSG      GMU_WORD(0x5100)        /* at start: where the log is, and its pages - 1 */
-#define GMU_PWR_COL_CP_RESP     GMU_WORD(0x5101)        /* ... and how far it was written before */
-#define GMU_HFI_SFR_ADDR        GMU_WORD(0x5182)        /* at start: which GPU this is */
-#define GMU_HFI_QTBL_INFO       GMU_WORD(0x5184)
-#define GMU_HFI_QTBL_ADDR       GMU_WORD(0x5185)
-#define GMU_HFI_CTRL_INIT       GMU_WORD(0x5186)
-#define GMU_GMU2HOST_INTR_CLR   GMU_WORD(0x5191)
-#define GMU_GMU2HOST_INTR_INFO  GMU_WORD(0x5192)        /* bit 0: a message for us; bit 31: the 3D core is ours */
-#define GMU_HOST2GMU_INTR_SET   GMU_WORD(0x5194)        /* bit 0: a message for the GMU; bit 30, 31: see step 17 */
-#define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x9307)
-#define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x9310)
-#define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x9311)
-#define GMU_CHIP                0x06035000      /* dt qcom,chipid 0x06030500 the way the firmware wants it */
+/*
+ * The gen7 GMU's registers are absolute words of the kgsl window (GMU_WORD), not
+ * redwood's 0x50xx block: the log and chip id go to GENERAL_8 and GENERAL_10,
+ * the HFI table to HFI_QTBL_ADDR, and the caches to 0x1f40x. The cold-start
+ * order is ShengGmu's: RSCC/PDC, the two FAL interfaces, TCM retention, the
+ * configuration words, then release CM3 and wait for FW and HFI.
+ */
+#define GMU_ICACHE_CONFIG       GMU_WORD(0x1f400)
+#define GMU_DCACHE_CONFIG       GMU_WORD(0x1f401)
+#define GMU_SYS_BUS_CONFIG      GMU_WORD(0x1f40f)
+#define GMU_CX_FAL_INTF         GMU_WORD(0x1f8f0)
+#define GMU_CX_FALNEXT_INTF     GMU_WORD(0x1f8f1)
+#define GMU_HFI_QTBL_INFO       GMU_WORD(0x1f984)
+#define GMU_HFI_QTBL_ADDR       GMU_WORD(0x1f985)
+#define GMU_HFI_CTRL_INIT       GMU_WORD(0x1f986)
+#define GMU_GMU2HOST_INTR_CLR   GMU_WORD(0x1f991)
+#define GMU_GMU2HOST_INTR_INFO  GMU_WORD(0x1f992)
+#define GMU_HOST2GMU_INTR_SET   GMU_WORD(0x1f994)
+#define GMU_GENERAL_8           GMU_WORD(0x1f9cd)
+#define GMU_GENERAL_9           GMU_WORD(0x1f9ce)
+#define GMU_GENERAL_10          GMU_WORD(0x1f9cf)
+#define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x23b11)
+#define GMU_PWR_COL_CP_RESP     GMU_WORD(0x1f9ce)  /* GENERAL_9: the log write pointer */
+#define GMU_CHIP                0x07110000u     /* a7xx gen1 gmu_chipid, as a735/a730 */
 #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
 #define GMU_STARTED             0x100
 #define GMU_FAILED              0xe00
+
+#define CX_MISC_TCM_RET_CNTL    (4 * 0x39)
+#define RSCC_HIDDEN_TCS_CMD0_ADDR (4 * 0x00d)
+#define RSCC_HIDDEN_TCS_CMD0_DATA (4 * 0x00e)
+#define RSCC_OVERRIDE_START_ADDR (4 * 0x100)
+#define RSCC_PDC_SEQ_START_ADDR (4 * 0x008)
+#define RSCC_PDC_MATCH_VALUE_LO (4 * 0x009)
+#define RSCC_PDC_MATCH_VALUE_HI (4 * 0x00a)
+#define RSCC_SEQ_MEM_0_A735     (4 * 0x154)     /* GEN7_2_0_RSCC_SEQ_MEM_0_DRV0 */
+#define PDC_GPU_ENABLE          (4 * 0x1140)
+#define PDC_GPU_SEQ_START_ADDR  (4 * 0x1148)
+#define GBIF_QSB_SIDE(n)        (4 * (0x03 + (n)))
+static struct block pdc_gen7 = { "pdc", 0x0b280000, 0x10000 };
 
 /* The table at the head of the HFI page and the three queues after it, as the vendor's driver lays them out. */
 struct hfi_queue {
@@ -1894,15 +1991,41 @@ struct hfi_table {
 
 static volatile struct hfi_table *hfi;  /* the uncached view */
 
-/*
- * Everything the vendor's driver writes before it lets the processor go (a6xx_gmu_register_config,
- * a6xx_gmu_power_config), in its order; then out of reset (a6xx_gmu_device_start).
- */
+/* The A740/A735 sequencer program from gen7_load_rsc_ucode and gen7_load_pdc_ucode. */
+static void
+gmu_rsc_setup(void)
+{
+	put(&rscc, "rsc_status0", RSCC_RSC_STATUS0_DRV0, 1u << 24);
+	put(&rscc, "pdc_slave_id", RSCC_PDC_SLAVE_ID_DRV0, 1);
+	put(&rscc, "hidden tcs data 0", RSCC_HIDDEN_TCS_CMD0_DATA, 0);
+	put(&rscc, "hidden tcs addr 0", RSCC_HIDDEN_TCS_CMD0_ADDR, 0);
+	put(&rscc, "hidden tcs data 1", RSCC_HIDDEN_TCS_CMD0_DATA + 8, 0);
+	put(&rscc, "hidden tcs addr 1", RSCC_HIDDEN_TCS_CMD0_ADDR + 8, 0);
+	put(&rscc, "hidden tcs data 2", RSCC_HIDDEN_TCS_CMD0_DATA + 16, 0x80000021);
+	put(&rscc, "hidden tcs addr 2", RSCC_HIDDEN_TCS_CMD0_ADDR + 16, 0);
+	put(&rscc, "override start", RSCC_OVERRIDE_START_ADDR, 0);
+	put(&rscc, "pdc seq start", RSCC_PDC_SEQ_START_ADDR, 0x4520);
+	put(&rscc, "pdc match lo", RSCC_PDC_MATCH_VALUE_LO, 0x4510);
+	put(&rscc, "pdc match hi", RSCC_PDC_MATCH_VALUE_HI, 0x4514);
+	put(&rscc, "seq mem 0", RSCC_SEQ_MEM_0_A735, 0xeaaae5a0);
+	put(&rscc, "seq mem 1", RSCC_SEQ_MEM_0_A735 + 4, 0xe1a1ebab);
+	put(&rscc, "seq mem 2", RSCC_SEQ_MEM_0_A735 + 8, 0xa2e0a581);
+	put(&rscc, "seq mem 3", RSCC_SEQ_MEM_0_A735 + 12, 0xecac82e2);
+	put(&rscc, "seq mem 4", RSCC_SEQ_MEM_0_A735 + 16, 0x0020edad);
+	if (!(gmu_skip & 2)) {
+		put(&pdc_gen7, "seq start", PDC_GPU_SEQ_START_ADDR, 0);
+		put(&pdc_gen7, "enable", PDC_GPU_ENABLE, 0x80000001);
+	}
+}
+
 static bool
 step_gmu_start(void)
 {
 	static const uint8_t priority[HFI_QUEUES] = { 10, 10, 40 };
-	uint32_t result = 0;
+	static const uint32_t config_regs[] = { GMU_CM3_FW_INIT_RESULT, GMU_CM3_BOOT_CONFIG, GMU_HFI_QTBL_ADDR,
+	    GMU_HFI_QTBL_INFO, GMU_CM3_CFG, GMU_GENERAL_10, GMU_GENERAL_8, GMU_AHB_FENCE_RANGE_0, GMU_SYS_BUS_CONFIG,
+	    GMU_ICACHE_CONFIG, GMU_DCACHE_CONFIG };
+	uint32_t config_values[sizeof(config_regs) / sizeof(config_regs[0])], result = 0, version, mask, ready;
 
 	if (!cx_ready() || !gmu_space_is_on) {
 		return false;
@@ -1923,52 +2046,77 @@ step_gmu_start(void)
 		hfi->queue[i].status = 1;
 	}
 
-	announce("tell the GMU where things are, by its registers: the message table, the log, which GPU this is; its "
-	    "caches and its use of RPMh; then let its processor out of reset");
+	announce("start the GMU: its RPMh/PDC program, retention, log and HFI addresses, caches, then out of reset");
 	if (get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET) != 1) {
 		printf("adreno: %u: the GMU's processor is not held in reset: not configuring it while it runs\n", step);
 		return false;
 	}
-	/*
-	 * Our own leaving (gpu_block_stop) hands the GMU's RPMh channel to the always-on sequencer, and
-	 * until it is taken back nothing the GMU asks of RPMh gets there: the vendor's
-	 * a6xx_rscc_wakeup_sequence, before the firmware starts.
-	 */
-	rscc_show();
-	if (rd(rscc.base + RSCC_RSC_STATUS0_DRV0) & RSCC_ASLEEP) {
-		put(&gmu, "rscc_control_req", GMU_RSCC_CONTROL_REQ, 2);
-		if (!wait_for(&gmu, GMU_RSCC_CONTROL_ACK, 2, 2, 100) || !wait_for(&rscc, RSCC_SEQ_BUSY_DRV0, ~0u, 0, 100)) {
-			printf("adreno: %u: the GMU's RPMh channel does not wake\n", step);
-		}
-		get(&gmu, "rscc_control_ack", GMU_RSCC_CONTROL_ACK);
-		put(&gmu, "rscc_control_req", GMU_RSCC_CONTROL_REQ, 0);
-		get(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0);
-		get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0);
+	if (get(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL) != 0) {
+		/* an early stop may have left retention on; the processor is in reset here */
+		put(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL, 0);
 	}
-	rsc_awake = true;
+	if (get(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL) != 0 ||
+	    get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0) != 0 ||
+	    (get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS) & 1) != 0) {
+		printf("adreno: %u: the GMU is not in the state ShengGmu requires before start\n", step);
+		return false;
+	}
+	if (!(gmu_skip & 1)) {
+		rscc_show();
+		gmu_rsc_setup();
+	} else {
+		printf("adreno: %u: RSC/PDC setup skipped (adreno_gmu_skip=%#x)\n", step, gmu_skip);
+	}
 	put(&gmu, "cx_falnext_intf", GMU_CX_FALNEXT_INTF, 1);
 	put(&gmu, "cx_fal_intf", GMU_CX_FAL_INTF, 1);
-	put(&gmu, "general_7", GMU_GENERAL_7, 1);
-	put(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT, 0);
-	put(&gmu, "cm3_boot_config", GMU_CM3_BOOT_CONFIG, 2);
-	put(&gmu, "hfi_qtbl_addr", GMU_HFI_QTBL_ADDR, GMU_HFI_ADDRESS);
-	put(&gmu, "hfi_qtbl_info", GMU_HFI_QTBL_INFO, 1);
-	put(&gmu, "ahb_fence_range_0", GMU_AHB_FENCE_RANGE_0, 1u << 31 | (0xa << 2) << 18 | 0x8a0);
-	put(&gmu, "cm3_cfg", GMU_CM3_CFG, 0x4052);
-	put(&gbif, "halt", GBIF_HALT, 0);
-	put(&gmu, "pwr_col_cp_resp", GMU_PWR_COL_CP_RESP, 0);
-	put(&gmu, "hfi_sfr_addr", GMU_HFI_SFR_ADDR, GMU_CHIP);
-	put(&gmu, "pwr_col_cp_msg", GMU_PWR_COL_CP_MSG, GMU_LOG_ADDRESS | (GMU_LOG_SIZE / 4096 - 1));
-	put(&gmu, "sys_bus_config", GMU_SYS_BUS_CONFIG, 1);
-	put(&gmu, "icache_config", GMU_ICACHE_CONFIG, 1);
-	put(&gmu, "dcache_config", GMU_DCACHE_CONFIG, 1);
-	put(&gmu, "pwr_col_inter_frame_ctrl", GMU_PWR_COL_INTER_FRAME_CTRL, 0x9c40400);
-	set(&gmu, "rpmh_ctrl", GMU_RPMH_CTRL, GMU_RPMH_CTRL_ALL);
-	put(&gmu, "gmu2host_intr_clr", GMU_GMU2HOST_INTR_CLR, 0xffffffff);
+	put(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL, 1);
+	if (get(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL) != 1) {
+		printf("adreno: %u: the GMU's TCM retention does not latch\n", step);
+		return false;
+	}
 
+	config_values[0] = 0;
+	config_values[1] = 2;
+	config_values[2] = GMU_HFI_ADDRESS;
+	config_values[3] = 1;
+	config_values[4] = 0x4052;
+	config_values[5] = GMU_CHIP;
+	config_values[6] = GMU_LOG_ADDRESS | 3;
+	config_values[7] = 1u << 31 | 0x32 << 18 | 0x8a0;
+	config_values[8] = 1;
+	config_values[9] = 1;
+	config_values[10] = 1;
+	for (unsigned i = 0; i < sizeof(config_regs) / sizeof(config_regs[0]); i++) {
+		put(&gmu, "config", config_regs[i], config_values[i]);
+	}
+	put(&gbif, "halt", GBIF_HALT, 0);
+	for (unsigned i = 0; i < 4; i++) {
+		put(&gbif, "qsb side", GBIF_QSB_SIDE(i), 0x71620);
+	}
+	put(&gmu, "gmu2host_intr_clr", GMU_GMU2HOST_INTR_CLR, 0xffffffff);
+	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
+	put(&gmu, "general_9", GMU_GENERAL_9, 0);
+	settle();
+
+	version = rd(gmu.base + GMU_DTCM_VERSIONS);
+	mask = version <= 0x20010004 ? ~0u : GMU_STARTED_MASK;
+	ready = mask == ~0u ? 0xbabeface : GMU_STARTED;
+	for (unsigned i = 0; i < sizeof(config_regs) / sizeof(config_regs[0]); i++) {
+		uint32_t was = rd(gmu.base + config_regs[i]);
+		if (was != config_values[i]) {
+			printf("adreno: %u: the GMU register at %#x did not keep %#x (is %#x)\n", step, config_regs[i],
+			    config_values[i], was);
+			return false;
+		}
+	}
+	if (gmu_skip & 4) {
+		printf("adreno: %u: not releasing CM3 (adreno_gmu_skip=%#x)\n", step, gmu_skip);
+		return true;
+	}
 	gmu_runs = true;
 	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 0);
-	for (int i = 0; i < 5000 && (result & GMU_STARTED_MASK) != GMU_STARTED && !(result & GMU_FAILED); i++) {
+	settle();
+	for (int i = 0; i < 5000 && (result & mask) != ready && !(result & GMU_FAILED); i++) {
 		sleep_us(100);
 		result = rd(gmu.base + GMU_CM3_FW_INIT_RESULT);
 	}
@@ -1976,12 +2124,20 @@ step_gmu_start(void)
 	get(&gmu, "gmu2host_intr_info", GMU_GMU2HOST_INTR_INFO);
 	get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
 	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
-	if (space_faulted(&gmu_space) || (result & GMU_STARTED_MASK) != GMU_STARTED) {
-		printf("adreno: %u: the GMU's firmware does not come up\n", step);
+	if (space_faulted(&gmu_space) || (result & mask) != ready) {
+		printf("adreno: %u: the GMU's firmware does not come up (result %#x, want %#x)\n", step, result, ready);
 		gmu_post_mortem();
 		return false;
 	}
 	printf("adreno: %u: THE GMU'S FIRMWARE RUNS\n", step);
+	put(&gmu, "hfi_ctrl_init", GMU_HFI_CTRL_INIT, 1);
+	settle();
+	if (!wait_for(&gmu, GMU_HFI_CTRL_STATUS, 1, 1, 500)) {
+		printf("adreno: %u: the GMU's HFI does not answer\n", step);
+		gmu_post_mortem();
+		return false;
+	}
+	printf("adreno: %u: THE GMU'S HFI ANSWERS\n", step);
 	return true;
 }
 
@@ -2180,7 +2336,6 @@ gmu_post_mortem(void)
 	rscc_show();
 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
 	get(&gpucc, "gx_sw_reset", GPUCC_GX_SW_RESET);
-	get(&gpucc, "gx_domain_misc", GPUCC_GX_DOMAIN_MISC);
 	get(&gpucc, "pll0 mode", GPUCC_PLL0_MODE);
 	get(&gpucc, "pll0 multiplier", GPUCC_PLL0_MODE + 4);
 	get(&gpucc, "pll1 mode", GPUCC_PLL1_MODE);
@@ -2969,35 +3124,6 @@ gx_off(void)
 		wait_for(&gpucc, GPUCC_GX_GDSCR, GDSC_POWER_ON, 0, 100);
 		get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
 	}
-}
-
-/* What step 4 does when it finds the GPU block running: see there. Nothing here has been set up by this kernel. */
-static void
-stale_stop(void)
-{
-	need(&gmu);
-	need(&rscc);
-	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
-	gx_off();
-	if (rd(rscc.base + RSCC_SEQ_MEM_0_DRV0) == 0xeaaae5a0 && !(rd(rscc.base + RSCC_RSC_STATUS0_DRV0) & RSCC_ASLEEP)) {
-		put(&gmu, "rscc_control_req", GMU_RSCC_CONTROL_REQ, 1);
-		wait_for(&rscc, RSCC_RSC_STATUS0_DRV0, RSCC_ASLEEP, RSCC_ASLEEP, 100);
-		get(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0);
-		put(&gmu, "rscc_control_req", GMU_RSCC_CONTROL_REQ, 0);
-	}
-	if (smmu_layout()) {
-		for (uint32_t match = 0; match < 3; match++) {
-			put(&smmu, "smr", SMMU_SMR(match), 0);
-			put(&smmu, "s2cr", SMMU_S2CR(match), SMMU_S2CR_FAULT);
-			put(&smmu, "cb sctlr", (smmu_pages + match) * smmu_page + SMMU_CB_SCTLR, 0);
-		}
-	}
-	put(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR, rd(gpucc.base + GPUCC_CX_GDSCR) | GDSC_SW_COLLAPSE);
-	for (int i = 0; i < 1000 && cx_is_on(); i++) {
-		sleep_us(100);
-	}
-	get(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR);
-	get(&gpucc, "cx_hw_ctrl", GPUCC_CX_HW_CTRL);
 }
 
 /*
@@ -4049,11 +4175,17 @@ hk_adreno_init(void)
 	}
 	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("adreno_fine", &fine, sizeof(fine));
+	PE_parse_boot_argn("adreno_gmu_skip", &gmu_skip, sizeof(gmu_skip));
+	PE_parse_boot_argn("adreno_aperture_reg", &aperture_reg, sizeof(aperture_reg));
 	if (last_step == 0) {
 		return;                                 /* (adreno=0: the GPU is left alone) */
 	}
 	if (last_step > STEPS) {
 		last_step = STEPS;
+	}
+	if (last_step > PERIDOT_GPU_STEPS) {
+		printf("adreno: peridot: only steps 1 to %u are ported; not attempting the rest\n", PERIDOT_GPU_STEPS);
+		last_step = PERIDOT_GPU_STEPS;
 	}
 	PE_parse_boot_argn("adreno_watch", &watch_seconds, sizeof(watch_seconds));
 	for (newest_step = last_step; newest_step > 0 && (skip_steps & 1u << newest_step); newest_step--) {

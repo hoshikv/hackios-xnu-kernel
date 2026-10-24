@@ -1,7 +1,7 @@
 /*
- * The buttons of the POCO X5 Pro (redwood) -- power, volume up, volume down -- as a source of
- * button records for /dev/hk-touch (sys/hk_input.h). Only with boot-arg buttons=1:
- * every address below belongs to this phone.
+ * The buttons of the POCO X5 Pro (redwood) and the Xiaomi 13 (peridot) -- power, volume up,
+ * volume down -- as a source of button records for /dev/hk-touch (sys/hk_input.h). Only with
+ * boot-arg buttons=1: every address below belongs to one of those phones.
  *
  * None of the three is a pin of the SoC. They are inputs of two of the power management chips:
  *   power        KPDPWR_N of the power-on block ("PON") of the PMK8350
@@ -38,15 +38,16 @@
  *   4  read how the keys' inputs are set up, and what they say now
  *   5  watch them                                       (the default)
  *
- * Register layouts: Linux drivers/spmi/spmi-pmic-arb.c (arbiter version 5),
- * drivers/input/misc/pm8941-pwrkey.c (the "pmk8350" kind), drivers/pinctrl/qcom/pinctrl-spmi-gpio.c,
- * and the phone's own device tree (qcom,spmi@c440000, pon_hlos@1300, gpio_keys).
+ * Register layouts: Linux drivers/spmi/spmi-pmic-arb.c (arbiter version 5 for redwood, 7 for
+ * peridot), drivers/input/misc/pm8941-pwrkey.c (the "pmk8350" kind), drivers/pinctrl/qcom/pinctrl-spmi-gpio.c,
+ * and the phones' own device trees (qcom,spmi@c440000 for redwood, qcom,spmi@c42d000 for peridot).
  */
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
+#include <pexpert/device_tree.h>
 #include <pexpert/pexpert.h>
 #include <sys/hk_input.h>
 #include <sys/hk_board.h>
@@ -94,22 +95,30 @@ wr(vm_offset_t address, uint32_t value)
 
 /* ---- the PMIC arbiter ---------------------------------------------------------------------------- */
 
-#define ARB_CORE_PHYS           hk_board_addr("spmi_core", 0x0c440000UL)    /* "core": the version, and which peripheral each channel is */
-#define ARB_CORE_SIZE           0x1100UL
-#define ARB_CNFG_PHYS           hk_board_addr("spmi_cnfg", 0x0c40a000UL)    /* "cnfg": which system owns each channel */
-#define ARB_CNFG_SIZE           0x1000UL
-#define ARB_OBSERVER_PHYS       hk_board_addr("spmi_obsrvr", 0x0e600000UL)    /* "obsrvr": 0x10000 per system, 0x80 per channel in it */
+#define ARB_CORE_PHYS           hk_board_addr("spmi_core", 0x0c440000UL)
+#define ARB_CORE_SIZE           0x4000UL
+#define ARB_CNFG_PHYS           hk_board_addr("spmi_cnfg", 0x0c40a000UL)
+#define ARB_CNFG_SIZE           0x4000UL
+#define ARB_CNFG_PHYS_SIZE      ARB_CNFG_SIZE
+#define ARB_OBSERVER_PHYS       hk_board_addr("spmi_obsrvr", 0x0e600000UL)
+#define ARB_REDWOOD_CORE_PHYS   0x0c440000UL
+#define ARB_REDWOOD_CNFG_PHYS   0x0c40a000UL
+#define ARB_REDWOOD_OBSERVER_PHYS 0x0e600000UL
+#define ARB_PERIDOT_CORE_PHYS   0x0c400000UL
+#define ARB_PERIDOT_CNFG_PHYS   0x0c42d000UL
+#define ARB_PERIDOT_OBSERVER_PHYS 0x0c440000UL
 #define ARB_OBSERVER_SIZE       0x10000UL       /* ours is the first */
 #define ARB_SYSTEM              0               /* who we are to the arbiter: the device tree's "qcom,ee" */
 
 #define ARB_VERSION             0x000
 #define ARB_VERSION_5           0x50000000u     /* what follows is version 5's; 7 moved things again */
 #define ARB_VERSION_7           0x70000000u
+#define ARB_VERSION_8           0x80000000u
 #define ARB_FEATURES            0x004           /* [10:0] the number of channels */
-#define ARB_CHANNEL(n)          (0x900 + 4 * (n))       /* core: [19:8] slave and peripheral, [24] interrupts go to the owner */
+#define ARB_CHANNEL(n)          (arb_apid_map + 4 * (n))    /* core: [19:8] slave and peripheral, [24] interrupts go to the owner */
 #define ARB_CHANNEL_INTERRUPTS  (1u << 24)
-#define ARB_OWNER(n)            (0x700 + 4 * (n))       /* cnfg: [2:0] the system that may write through channel n */
-#define ARB_MAX_CHANNELS        512
+#define ARB_OWNER(n)            (arb_owner_base + 4 * (n))  /* cnfg: [2:0] the system that may write through channel n */
+#define ARB_MAX_CHANNELS        1024
 
 #define OBSERVER_COMMAND        0x00
 #define OBSERVER_STATUS         0x08
@@ -123,6 +132,12 @@ wr(vm_offset_t address, uint32_t value)
 #define READ_TIMEOUT_US         2000            /* a read takes some tens of microseconds */
 
 static vm_offset_t arb_core, arb_cnfg, arb_observer;
+static vm_offset_t arb_core_phys = ARB_REDWOOD_CORE_PHYS;
+static vm_offset_t arb_cnfg_phys = ARB_REDWOOD_CNFG_PHYS;
+static vm_offset_t arb_observer_phys = ARB_REDWOOD_OBSERVER_PHYS;
+static uint32_t arb_apid_map = 0x900;           /* v5: core + 0x900; v7: core + 0x2000 */
+static uint32_t arb_owner_base = 0x700;         /* v5: cnfg + 0x700; v7: cnfg + 0 */
+static uint32_t arb_observer_stride = 0x80;     /* v5: 0x80 per APID; v7: 0x20 per APID */
 
 /*
  * One transfer at a time through the arbiter for this system, whoever asks (the flashlight's
@@ -153,6 +168,19 @@ struct peripheral {
 static struct peripheral pon = { .name = "the PMK8350's power-on block", .id = 0x013 };          /* registers 0x1300 of slave 0 */
 static struct peripheral pin = { .name = "GPIO6 of the PM7325", .id = 0x18d };                   /* registers 0x8d00 of slave 1 */
 
+/* The loader writes the platform name into /arm-io/device_type. */
+static bool
+board_is_peridot(void)
+{
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	return SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess &&
+	    size >= 7 && memcmp(prop, "peridot", 7) == 0;
+}
+
 /* How the reads have gone: said once a minute. */
 static struct {
 	uint64_t reads, failed, total_ns, longest_ns, last_ns;
@@ -165,7 +193,7 @@ static struct {
 static const char *
 spmi_read(const struct peripheral *p, uint8_t reg, uint8_t *bytes, uint32_t count)
 {
-	vm_offset_t channel = arb_observer + 0x10000UL * ARB_SYSTEM + 0x80UL * p->channel;
+	vm_offset_t channel = arb_observer + 0x10000UL * ARB_SYSTEM + arb_observer_stride * p->channel;
 	uint64_t start = mach_absolute_time(), now, interval, taken;
 	uint32_t status, data[2];
 	const char *problem = NULL;
@@ -272,6 +300,7 @@ static struct button {
 	bool            live;           /* it has been seen released */
 	bool            last;           /* the look before this one */
 	bool            down;           /* as reported */
+	bool            active_high;    /* the pin reads high while the key is held */
 	uint64_t        since;          /* when it went down */
 	uint32_t        presses;
 } power = { .name = "power", .record = HK_BUTTON_LOCK },
@@ -347,7 +376,7 @@ buttons_poll(void)
 	if (volume_up.usable) {
 		problem = spmi_read(&pin, REG_RT_STATUS, &status, 1);
 		if (problem == NULL) {
-			button_look(&volume_up, !(status & GPIO_LEVEL));
+			button_look(&volume_up, volume_up.active_high ? !!(status & GPIO_LEVEL) : !(status & GPIO_LEVEL));
 		} else if (said < 8) {
 			said++;
 			printf("buttons: reading %s: %s\n", pin.name, problem);
@@ -389,20 +418,24 @@ pon_inputs(void)
 
 	printf("buttons: next: read the status and the interrupt setup of %s (registers 0x1310 to 0x1319)\n", pon.name);
 	problem = spmi_read(&pon, REG_RT_STATUS, r, 8);
-	if (problem == NULL) {
-		problem = spmi_read(&pon, REG_INT_LATCHED, more, 2);
-	}
 	if (problem != NULL) {
 		printf("buttons: %s: %s\n", pon.name, problem);
+		return;
+	}
+	/* The status is enough to watch the keys; some PON revisions do not expose 0x1318/0x1319. */
+	power.usable = volume_down.usable = true;
+	power.last = r[0] & PON_KPDPWR;
+	volume_down.last = r[0] & PON_RESIN;
+	problem = spmi_read(&pon, REG_INT_LATCHED, more, 2);
+	if (problem != NULL) {
+		printf("buttons: power-on block: status %#x (power %s, volume down %s); interrupt registers: %s\n", r[0],
+		    (r[0] & PON_KPDPWR) ? "HELD" : "released", (r[0] & PON_RESIN) ? "HELD" : "released", problem);
 		return;
 	}
 	printf("buttons: power-on block: status %#x (power %s, volume down %s); interrupts: edge %#x, high %#x, low %#x, "
 	    "enabled %#x, latched %#x, pending %#x\n", r[0], (r[0] & PON_KPDPWR) ? "HELD" : "released",
 	    (r[0] & PON_RESIN) ? "HELD" : "released", r[REG_INT_SET_TYPE - REG_RT_STATUS], r[REG_INT_POLARITY_HIGH - REG_RT_STATUS],
 	    r[REG_INT_POLARITY_LOW - REG_RT_STATUS], r[REG_INT_ENABLED - REG_RT_STATUS], more[0], more[1]);
-	power.usable = volume_down.usable = true;
-	power.last = r[0] & PON_KPDPWR;
-	volume_down.last = r[0] & PON_RESIN;
 }
 
 /* Step 4 for the pin: it is volume up only if it is an input with a pull-up, and switched on. */
@@ -413,7 +446,8 @@ pin_input(void)
 	uint8_t c[8], status = 0;
 	unsigned mode, pull;
 
-	printf("buttons: next: read the setup and the level of %s (registers 0x8d40 to 0x8d47, 0x8d10)\n", pin.name);
+	printf("buttons: next: read the setup and the level of %s (registers 0x%02x40 to 0x%02x47, 0x%02x10)\n",
+	    pin.name, pin.id & 0xff, pin.id & 0xff, pin.id & 0xff);
 	problem = spmi_read(&pin, GPIO_REG_MODE, c, 8);
 	if (problem == NULL) {
 		problem = spmi_read(&pin, REG_RT_STATUS, &status, 1);
@@ -428,14 +462,17 @@ pin_input(void)
 	    "%02x %02x; level %s\n", mode, mode == 0 ? "input" : mode == 1 ? "output" : mode == 2 ? "input and output" : "analog",
 	    c[GPIO_REG_SUPPLY - GPIO_REG_MODE] & 7, pull, pull < 4 ? "up" : pull == 4 ? "down" : "none",
 	    (c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80) ? "enabled" : "DISABLED", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-	    (status & GPIO_LEVEL) ? "high (released)" : "LOW (held)");
-	if (mode != 0 || pull >= 4 || !(c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80)) {
-		printf("buttons: volume up's pin is not an enabled input with a pull-up. Making it one is a write to the PMIC, "
+	    (status & GPIO_LEVEL) ? "high" : "low");
+	if (mode != 0 || pull > 4 || !(c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80)) {
+		printf("buttons: volume up's pin is not an enabled input with a pull. Making it one is a write to the PMIC, "
 		    "which this driver does not do: volume up is left alone\n");
 		return;
 	}
+	volume_up.active_high = (pull == 4);
 	volume_up.usable = true;
-	volume_up.last = !(status & GPIO_LEVEL);
+	volume_up.last = volume_up.active_high ? !!(status & GPIO_LEVEL) : !(status & GPIO_LEVEL);
+	printf("buttons: volume up's pin keeps itself %s, so the key reads %s: watching it\n",
+	    volume_up.active_high ? "low" : "high", volume_up.active_high ? "high when held" : "low when held");
 }
 
 static void
@@ -452,18 +489,30 @@ static void
 buttons_thread(void *parameter, __unused wait_result_t result)
 {
 	uint32_t steps = (uint32_t)(uintptr_t)parameter, version, channels;
-	bool pon_known, pin_known;
+	bool peridot = board_is_peridot(), pon_known, pin_known;
 
-	printf("buttons: step 1: map the PMIC arbiter (%#lx, %#lx, %#lx) and read its version\n", ARB_CORE_PHYS, ARB_CNFG_PHYS,
-	    ARB_OBSERVER_PHYS);
-	arb_core = ml_io_map(ARB_CORE_PHYS, ARB_CORE_SIZE);
-	arb_cnfg = ml_io_map(ARB_CNFG_PHYS, ARB_CNFG_SIZE);
-	arb_observer = ml_io_map(ARB_OBSERVER_PHYS, ARB_OBSERVER_SIZE);
+	if (peridot) {
+		arb_core_phys = ARB_PERIDOT_CORE_PHYS;
+		arb_cnfg_phys = ARB_PERIDOT_CNFG_PHYS;
+		arb_observer_phys = ARB_PERIDOT_OBSERVER_PHYS;
+		arb_apid_map = 0x2000;
+		arb_owner_base = 0;
+		arb_observer_stride = 0x20;
+		pon.name = "the PMK8550's power-on block";
+		pin.name = "GPIO6 of the PMXR2230";
+		pin.id = 0x18e;
+	}
+	printf("buttons: board %s: step 1: map the PMIC arbiter (%#lx, %#lx, %#lx) and read its version\n",
+	    peridot ? "peridot" : "redwood", arb_core_phys, arb_cnfg_phys, arb_observer_phys);
+	arb_core = ml_io_map(arb_core_phys, ARB_CORE_SIZE);
+	arb_cnfg = ml_io_map(arb_cnfg_phys, ARB_CNFG_PHYS_SIZE);
+	arb_observer = ml_io_map(arb_observer_phys, ARB_OBSERVER_SIZE);
 	version = rd(arb_core + ARB_VERSION);
 	channels = rd(arb_core + ARB_FEATURES) & 0x7ff;
 	printf("buttons: PMIC arbiter version %#x, %u channels\n", version, channels);
-	if (version < ARB_VERSION_5 || version >= ARB_VERSION_7) {
-		printf("buttons: this driver knows version 5 of the arbiter only: no buttons\n");
+	if (!((version >= ARB_VERSION_5 && version < 0x60000000u) ||
+	    (version >= ARB_VERSION_7 && version < ARB_VERSION_8))) {
+		printf("buttons: this driver knows arbiter versions 5 and 7 only: no buttons\n");
 		goto out;
 	}
 	if (channels == 0 || channels > ARB_MAX_CHANNELS) {
@@ -543,9 +592,7 @@ hk_buttons_init(void)
 	 * has pressed all three keys and each press and release was read as it was made.
 	 */
 	if (!PE_parse_boot_argn("buttons", &enabled, sizeof(enabled))) {
-		uint32_t touch_screen = 0;
-
-		enabled = PE_parse_boot_argn("touchscreen", &touch_screen, sizeof(touch_screen)) && touch_screen != 0;
+		enabled = 1;    /* peridot: power and the volume keys are watched by default; buttons=0 turns them off */
 	}
 	if (!enabled) {
 		return;

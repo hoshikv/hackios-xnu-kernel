@@ -20,8 +20,8 @@
  *   - processor 2 (not 13) in the shared memory; its SMP2P items 443 (its) and 429 (ours), its
  *     last words in item 423; GLINK's three items in our partition with it
  *   - its doorbells are IPCC client 3 (LPASS): signal 0 GLINK, signal 2 SMP2P
- *   - TrustZone knows it as image 1; its memory is 0x86700000, 64 MB (dt: qcom,lpass@3700000,
- *     reserved-memory adsp@86700000), every byte of which the image takes
+ *   - TrustZone knows it as image 1; its memory is 0x9d400000, 69 MB (dt: qcom,lpass@3700000,
+ *     reserved-memory adspslpi_region@9d400000), every byte of which the image takes
  *   - the always-on processor is told of it as "adsp"
  *   - the Wi-Fi DSP may be running at the same time (wifi=1): the mailbox to the always-on
  *     processor and the lock for allocating in the shared memory are the two things both use,
@@ -287,7 +287,7 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
 
 /* ---- the shared memory (hk_wifi.c, step 1) --------------------------------------------------- */
 
-#define SMEM_PHYS               0x80900000UL
+#define SMEM_PHYS               0x81d00000UL
 #define SMEM_SIZE               0x00200000u
 #define SMEM_US                 0
 #define SMEM_ADSP               2               /* dt: qcom,remote-pid of qcom,smp2p-adsp and qcom,glink/adsp */
@@ -329,15 +329,31 @@ struct smem_item {
 
 static const volatile uint8_t *smem;
 
+extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
+
+/*
+ * The shared memory is mapped cacheable here (an uncached mapping of its last page takes an
+ * external abort on this platform). The DSP is not coherent with our caches, so the lines we
+ * touch are cleaned and invalidated at the point of coherency around every access.
+ */
+static void
+smem_sync(uint32_t offset, uint32_t size)
+{
+	vm_offset_t start = (vm_offset_t)smem + (offset & ~63u);
+
+	FlushPoC_DcacheRegion(start, (vm_offset_t)smem + offset + size - start);
+}
+
 static bool
 smem_peek(uint64_t offset, void *to, uint32_t size)
 {
 	if (smem == NULL) {
-		smem = (const volatile uint8_t *)ml_io_map_unmappable(SMEM_PHYS, SMEM_SIZE, VM_WIMG_WCOMB);
+		smem = (const volatile uint8_t *)ml_io_map_unmappable(SMEM_PHYS, SMEM_SIZE, VM_WIMG_COPYBACK);
 	}
 	if (offset + size > SMEM_SIZE) {
 		return false;
 	}
+	smem_sync((uint32_t)offset, size);
 	for (uint32_t i = 0; i < size; i++) {
 		((uint8_t *)to)[i] = smem[offset + i];
 	}
@@ -348,11 +364,13 @@ static void
 smem_poke(uint32_t offset, uint32_t value)
 {
 	wr((vm_offset_t)smem + offset, value);
+	smem_sync(offset, sizeof(value));
 }
 
 static uint32_t
 smem_word(uint32_t offset)
 {
+	smem_sync(offset, sizeof(uint32_t));
 	return rd((vm_offset_t)smem + offset);
 }
 
@@ -615,7 +633,7 @@ static struct block aoss = { "mailbox", 0x0c300000, 0x400 };
 #define IPCC_GLINK              0u
 #define IPCC_SMP2P              2u
 
-static struct block ipcc = { "ipcc", 0x00408000, 0x1000 };
+static struct block ipcc = { "ipcc", 0x00406000, 0x1000 };
 
 static struct {
 	uint32_t glink, smp2p, said;
@@ -783,7 +801,7 @@ out:
  * the list of its levels that the boot loader's command database keeps (cmd-db.c), the first
  * position at or above the level wanted.
  */
-#define CMD_DB_PHYS             0x80860000UL
+#define CMD_DB_PHYS             0x81c60000UL
 #define CMD_DB_SIZE             0x20000UL
 
 struct cmd_db_slave {
@@ -805,20 +823,46 @@ struct cmd_db_entry {
 
 static const struct cmd_db_header *cmd_db;
 
-static struct block rsc = { "rsc", 0x18220000, 0x10000 };
+static struct block rsc = { "rsc", 0x17a20000, 0x10000 };  /* dt: apps_rsc drv@2, whose tcs-offset is 0xd00 */
 #define RSC_TCS_BASE            0xd00
 #define RSC_IRQ_STATUS          (RSC_TCS_BASE + 0x04)   /* a bit per TCS: done */
 #define RSC_IRQ_CLEAR           (RSC_TCS_BASE + 0x08)
 #define RSC_TCS(n)              (RSC_TCS_BASE + 672 * (n))
-#define TCS_WAIT_FOR_DONE       0x10
-#define TCS_CONTROL             0x14
-#define TCS_STATUS              0x18                    /* not zero: idle */
-#define TCS_ENABLED             0x1c
-#define TCS_COMMAND(c)          (0x30 + 20 * (c))       /* message id, address, value, status */
 #define TCS_ACTIVE_MODE         (1u << 16)
 #define TCS_TRIGGER             (1u << 24)
-#define MSGID_WRITE_WAITED      (8u | 1u << 8 | 1u << 16)       /* four bytes, an answer wanted, a write */
+
 #define RPMH_TCS                0                       /* the first of the two for requests made at once */
+
+/* The layout of a TCS depends on the sequencer's version: 2.7 has 20-byte commands, 3.0 has 24. */
+static uint32_t tcs_wait_for_done = 0x10, tcs_control = 0x14, tcs_status = 0x18, tcs_enabled = 0x1c;
+static uint32_t tcs_command = 0x30, tcs_command_size = 20;
+static bool rsc_layout_read;
+
+static void
+rsc_layout(void)
+{
+	uint32_t id, major, minor;
+
+	if (rsc_layout_read) {
+		return;
+	}
+	need(&rsc);
+	id = rd(rsc.base + 0);
+	major = (id >> 16) & 0xff;
+	minor = (id >> 8) & 0xff;
+	if (major >= 3) {
+		tcs_wait_for_done = 0x20;
+		tcs_control = 0x24;
+		tcs_status = 0x28;
+		tcs_enabled = 0x2c;
+		tcs_command = 0x34;
+		tcs_command_size = 24;
+	}
+	printf("adsp: %u: RSC version %u.%u (%#x): TCS status at %#x, commands at %#x/%u\n", step, major, minor, id,
+	    RSC_TCS(RPMH_TCS) + tcs_status, RSC_TCS(RPMH_TCS) + tcs_command, tcs_command_size);
+	rsc_layout_read = true;
+}
+#define MSGID_WRITE_WAITED      (8u | 1u << 8 | 1u << 16)       /* four bytes, an answer wanted, a write */
 
 /* The level position RPMh takes for that rail and level; -1: not found. */
 static int
@@ -896,11 +940,11 @@ rails(uint32_t level)
 		}
 		values[r] = (uint32_t)position;
 	}
-	need(&rsc);
+	rsc_layout();
 	/* (the boot loader leaves the trigger set after its last request, done: idle is what the status says) */
-	if (rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS) == 0) {
+	if (rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_status) == 0) {
 		printf("adsp: %u: TCS %u of the sequencer is busy (status %#x, control %#x): the rails are not asked\n", step, RPMH_TCS,
-		    rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS), rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL));
+		    rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_status), rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control));
 		return false;
 	}
 	printf("adsp: %u: about to ask RPMh, through TCS %u, for lcx.lvl (%#x) = %u and lmx.lvl (%#x) = %u (level %u%s)\n", step,
@@ -909,16 +953,16 @@ rails(uint32_t level)
 	hold();
 	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
 	for (unsigned r = 0; r < 2; r++) {
-		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r), MSGID_WRITE_WAITED);
-		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r) + 4, addresses[r]);
-		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r) + 8, values[r]);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + tcs_command_size * r, MSGID_WRITE_WAITED);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + tcs_command_size * r + 4, addresses[r]);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + tcs_command_size * r + 8, values[r]);
 	}
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_WAIT_FOR_DONE, 3);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 3);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_wait_for_done, 3);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_enabled, 3);
 	settle();
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~TCS_TRIGGER);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_ACTIVE_MODE);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_TRIGGER);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control) & ~TCS_TRIGGER);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control) | TCS_ACTIVE_MODE);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control) | TCS_TRIGGER);
 	began = now_us();
 	while (now_us() - began < 100000) {
 		done = rd(rsc.base + RSC_IRQ_STATUS) & (1u << RPMH_TCS);
@@ -928,11 +972,11 @@ rails(uint32_t level)
 		sleep_us(50);
 	}
 	printf("adsp: %u: RPMh %s after %llu us; the commands' status %#x %#x, the TCS's %#x\n", step, done ? "HAS DONE IT" :
-	    "HAS NOT SAID DONE", now_us() - began, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(0) + 12),
-	    rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(1) + 12), rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS));
+	    "HAS NOT SAID DONE", now_us() - began, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + 12),
+	    rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_command + tcs_command_size + 12), rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_status));
 	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 0);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control, rd(rsc.base + RSC_TCS(RPMH_TCS) + tcs_control) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + tcs_enabled, 0);
 	return done != 0;
 }
 
@@ -962,9 +1006,12 @@ step_survey(void)
 
 /* ---- step 2: the firmware -------------------------------------------------------------------------- */
 
-#define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
-#define ADSP_MEMORY_SIZE        0x04000000u
+#define ADSP_MEMORY             0x9d400000u     /* dt: reserved-memory adspslpi_region@9d400000 (peridot: 0x4500000 bytes) */
+#define ADSP_MEMORY_SIZE        0x04500000u
+#define ADSP_DTB_MEMORY         0xa1900000u     /* dt: reserved-memory q6_adsp_dtb_region@a1900000 (0x80000 bytes) */
+#define ADSP_DTB_MEMORY_SIZE    0x00080000u
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
+#define PAS_ADSP_DTB            0x24            /* dt: qcom,dtb-pas-id (cliffs-adsp-pas) */
 
 
 /*
@@ -1058,7 +1105,7 @@ image_file(const char *name, uint64_t *size)
 
 
 #define MDT_HASH(flags)         (((flags) >> 24 & 7) == 2)
-#define MAX_SEGMENTS            48
+#define MAX_SEGMENTS            64
 
 struct elf_segment {
 	uint32_t type, offset, vaddr, paddr, file_size, memory_size, flags, align;
@@ -1075,6 +1122,28 @@ static struct {
 	unsigned segments;
 	uint32_t size;
 } image;
+
+/*
+ * Peridot's ADSP takes a separate device tree, loaded through its own PAS channel (0x24) just
+ * past the DSP's own memory.  It is relocatable: the header's lowest segment address is not the
+ * address it runs at, so the segments are copied from that lowest address into a cleared
+ * 0xa1900000, the size TrustZone is told is their span.
+ */
+static struct {
+	const uint8_t *header;
+	uint64_t header_size;
+	bool header_from_root;
+	struct {
+		uint32_t at, paddr;
+		uint32_t file_size, memory_size;
+		const uint8_t *file;
+		bool from_root;
+	} segment[MAX_SEGMENTS];
+	unsigned segments;
+	uint32_t size;
+} dtb_image;
+
+static bool dtb_started;
 
 /* The image's files given back, if they were read into memory of ours. */
 static void
@@ -1341,6 +1410,192 @@ dsp_ask_to_stop(uint32_t bound_ms)
 
 static void link_stop(void);
 
+static void
+dtb_forget(void)
+{
+	if (dtb_image.header != NULL && dtb_image.header_from_root) {
+		void *data = (void *)(uintptr_t)dtb_image.header;
+
+		kfree_data(data, dtb_image.header_size);
+	}
+	for (unsigned s = 0; s < dtb_image.segments; s++) {
+		if (dtb_image.segment[s].file != NULL && dtb_image.segment[s].from_root) {
+			void *data = (void *)(uintptr_t)dtb_image.segment[s].file;
+
+			kfree_data(data, dtb_image.segment[s].file_size);
+		}
+	}
+	bzero(&dtb_image, sizeof(dtb_image));
+}
+
+/* A DTB file: first in the small image, where ADSP=1 userland/build.sh puts fw-audio/, then /fw on the root. */
+static const uint8_t *
+dtb_file(const char *name, uint64_t *size, bool *from_root)
+{
+	const uint8_t *data = hk_image_file("fw", name, size, NULL);
+
+	if (data != NULL) {
+		*from_root = false;
+		return data;
+	}
+	data = root_file(name, size);
+	if (data != NULL) {
+		*from_root = true;
+	}
+	return data;
+}
+
+/*
+ * Load and start adsp_dtb.mdt through PAS 0x24.  Linux does this in adsp_load(), before the
+ * DSP's own image is authenticated; its absence is not fatal here, so an older root image can
+ * still bring the DSP up (the cost is that a DSP that needs its DT will not answer).
+ */
+static bool
+dtb_load(void)
+{
+	struct elf_segment segment;
+	const uint8_t *header;
+	uint64_t size = 0, files = 0;
+	uint32_t count, hashes = 0, lowest = ~0u, highest = 0;
+	uint64_t answer = ~0ull;
+	int32_t result;
+	vm_offset_t page = 0;
+	uint8_t *memory;
+	bool ok = false;
+
+	dtb_forget();
+	header = dtb_file("adsp_dtb.mdt", &size, &dtb_image.header_from_root);
+	if (header == NULL) {
+		printf("adsp: %u: no fw/adsp_dtb.mdt in the small image nor on the root: starting the audio DSP without its "
+		    "device tree\n", step);
+		return true;
+	}
+	dtb_image.header = header;
+	dtb_image.header_size = size;
+	count = size >= 52 + 2 * 32 ? header[44] | header[45] << 8 : 0;
+	if (memcmp(header, "\177ELF\1", 5) != 0 || count < 1 || count > MAX_SEGMENTS || 52 + 32 * count > size ||
+	    size > PAGE_SIZE) {
+		printf("adsp: %u: fw/adsp_dtb.mdt is not such a header (%02x %02x %02x %02x, %u segments, %llu bytes)\n", step,
+		    header[0], header[1], header[2], header[3], count, size);
+		goto fail;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		char name[24];
+		uint64_t file_size = 0;
+
+		memcpy(&segment, header + 52 + 32 * i, sizeof(segment));
+		if (MDT_HASH(segment.flags)) {
+			hashes = segment.file_size;
+			continue;
+		}
+		if (segment.type != 1 || segment.memory_size == 0) {
+			continue;
+		}
+		if (segment.file_size > segment.memory_size) {
+			printf("adsp: %u: the DTB's segment %u is longer than the memory it asks for\n", step, i);
+			goto fail;
+		}
+		if (dtb_image.segments == MAX_SEGMENTS) {
+			printf("adsp: %u: the DTB has too many segments\n", step);
+			goto fail;
+		}
+		snprintf(name, sizeof(name), "adsp_dtb.b%02u", i);
+		if (segment.file_size != 0) {
+			dtb_image.segment[dtb_image.segments].file = dtb_file(name, &file_size,
+			    &dtb_image.segment[dtb_image.segments].from_root);
+			if (dtb_image.segment[dtb_image.segments].file == NULL) {
+				goto fail;
+			}
+			if (file_size != segment.file_size) {
+				printf("adsp: %u: fw/%s has %llu bytes, the header says %u\n", step, name, file_size,
+				    segment.file_size);
+				dtb_image.segments++;
+				goto fail;
+			}
+			files += file_size;
+		}
+		dtb_image.segment[dtb_image.segments].at = 0;
+		dtb_image.segment[dtb_image.segments].paddr = segment.paddr;
+		dtb_image.segment[dtb_image.segments].file_size = segment.file_size;
+		dtb_image.segment[dtb_image.segments].memory_size = segment.memory_size;
+		if (segment.paddr < lowest) {
+			lowest = segment.paddr;
+		}
+		if (segment.paddr + segment.memory_size > highest) {
+			highest = segment.paddr + segment.memory_size;
+		}
+		dtb_image.segments++;
+	}
+	if (dtb_image.segments == 0 || lowest == ~0u || 52 + 32 * count + (uint64_t)hashes != size) {
+		printf("adsp: %u: the DTB is not what TrustZone takes: %u segments, the header file has %llu bytes\n", step,
+		    dtb_image.segments, size);
+		goto fail;
+	}
+	if ((uint64_t)highest - lowest > ADSP_DTB_MEMORY_SIZE) {
+		printf("adsp: %u: the DTB spans %#llx bytes, its reserved memory is %#x\n", step,
+		    (uint64_t)highest - lowest, ADSP_DTB_MEMORY_SIZE);
+		goto fail;
+	}
+	dtb_image.size = ((highest + 0xfff) & ~0xfffu) - lowest;
+	if (dtb_image.size > ADSP_DTB_MEMORY_SIZE) {
+		printf("adsp: %u: the DTB spans %#x bytes when rounded to a page, its reserved memory is %#x\n", step,
+		    dtb_image.size, ADSP_DTB_MEMORY_SIZE);
+		goto fail;
+	}
+	for (unsigned s = 0; s < dtb_image.segments; s++) {
+		dtb_image.segment[s].at = dtb_image.segment[s].paddr - lowest;
+	}
+	printf("adsp: %u: the DTB is whole: a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
+	    "bytes from %#x\n", step, size, hashes, dtb_image.segments, files, dtb_image.size, lowest);
+
+	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		printf("adsp: %u: no memory for the DTB's header\n", step);
+		goto fail;
+	}
+	memcpy((void *)page, header, dtb_image.header_size);
+	for (vm_offset_t line = page; line < page + PAGE_SIZE; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	settle();
+	result = scm("to take the audio DSP's DTB header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_ADSP_DTB,
+	    kvtophys(page), 0, &answer);
+	if (result != 0 || answer != 0) {
+		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB HEADER: the call returns %d, its answer is %#llx\n", step,
+		    result, answer);
+		goto fail;
+	}
+	result = scm("where the audio DSP's DTB will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP_DTB,
+	    ADSP_DTB_MEMORY, dtb_image.size, &answer);
+	if (result != 0 || answer != 0) {
+		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB'S PLACE: the call returns %d, its answer is %#llx\n", step,
+		    result, answer);
+		goto fail;
+	}
+	memory = (uint8_t *)ml_io_map_unmappable(ADSP_DTB_MEMORY, ADSP_DTB_MEMORY_SIZE, VM_WIMG_WCOMB);
+	if (memory == NULL) {
+		printf("adsp: %u: no mapping for the DTB's memory at %#x\n", step, ADSP_DTB_MEMORY);
+		goto fail;
+	}
+	memset(memory, 0, dtb_image.size);
+	for (unsigned s = 0; s < dtb_image.segments; s++) {
+		memcpy(memory + dtb_image.segment[s].at, dtb_image.segment[s].file, dtb_image.segment[s].file_size);
+	}
+	settle();
+	result = scm("to authenticate the audio DSP's DTB and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE,
+	    PAS_ADSP_DTB, 0, 0, &answer);
+	if (result != 0 || answer != 0) {
+		printf("adsp: %u: TRUSTZONE DOES NOT START THE DTB: the call returns %d, its answer is %#llx\n", step, result,
+		    answer);
+		goto fail;
+	}
+	dtb_started = true;
+	printf("adsp: %u: THE AUDIO DSP'S DTB IS STARTED: %#x bytes at %#x\n", step, dtb_image.size, ADSP_DTB_MEMORY);
+	ok = true;
+fail:
+	dtb_forget();
+	return ok;
+}
+
 /* Asked to stop, then shut down by TrustZone, then the always-on processor told that the image is gone. */
 static bool
 dsp_shutdown(const char *why)
@@ -1360,6 +1615,18 @@ dsp_shutdown(const char *why)
 		return false;
 	}
 	printf("adsp: %u: THE AUDIO DSP IS SHUT DOWN\n", step);
+	if (dtb_started) {
+		answer = ~0ull;
+		result = scm("to shut the audio DSP's DTB down", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_ADSP_DTB, 0, 0,
+		    &answer);
+		if (result != 0 || answer != 0) {
+			printf("adsp: %u: TRUSTZONE DOES NOT SHUT THE DTB DOWN: the call returns %d, its answer is %#llx\n", step,
+			    result, answer);
+		} else {
+			printf("adsp: %u: THE AUDIO DSP'S DTB IS SHUT DOWN\n", step);
+			dtb_started = false;
+		}
+	}
 	need(&ipcc);
 	wr(ipcc.base + IPCC_DISABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
 	doorbells();
@@ -1398,6 +1665,11 @@ step_header(void)
 		}
 	} else {
 		printf("adsp: %u: the DSP has left nothing in the shared memory: it has not run since the phone was started\n", step);
+	}
+
+	announce("load the audio DSP's device tree through its own PAS channel (0x24)");
+	if (!dtb_load()) {
+		return false;
 	}
 
 	announce("hand the image's header to TrustZone to check its signature (image 1), in a page of ours");
@@ -1458,12 +1730,12 @@ step_image(void)
 	for (unsigned s = 0; s < image.segments; s++) {
 		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
 
-		if ((image.segment[s].at | image.segment[s].memory_size) & 7) {
-			printf("adsp: %u: a segment that does not begin and end at a multiple of eight bytes: not written\n", step);
+		if (image.segment[s].at & 7) {
+			printf("adsp: %u: a segment that does not begin at a multiple of eight bytes: not written\n", step);
 			ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
 			return false;
 		}
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+		for (uint32_t i = 0; i < ((image.segment[s].memory_size + 7) & ~7u); i += 8) {
 			to[i / 8] = segment_word(s, i);
 		}
 		written += image.segment[s].file_size;
@@ -1473,7 +1745,7 @@ step_image(void)
 	for (unsigned s = 0; s < image.segments; s++) {
 		volatile uint64_t *from = dsp_memory + image.segment[s].at / 8;
 
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+		for (uint32_t i = 0; i < ((image.segment[s].memory_size + 7) & ~7u); i += 8) {
 			wrong += from[i / 8] != segment_word(s, i);
 		}
 	}
@@ -1657,10 +1929,8 @@ step_start(void)
 	}
 	rails_asked = true;
 	if (!mailbox_send("{class: image, res: load_state, name: adsp, val: on}")) {
-		rails(0);
-		rails_asked = false;
-		lck_mtx_unlock(&dsp_lock);
-		return false;
+		/* peridot's always-on processor does not always take this; it is not what starts the DSP */
+		printf("adsp: %u: THE ALWAYS-ON PROCESSOR DOES NOT TAKE THE IMAGE'S STATE: carrying on to TrustZone\n", step);
 	}
 	result = scm("to authenticate the audio DSP's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, PAS_ADSP, 0, 0,
 	    &answer);
@@ -3375,8 +3645,13 @@ hk_adsp_init(void)
 	thread_t thread;
 
 	PE_parse_boot_argn("adsp_step", &last_step, sizeof(last_step));
-	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
-		return;
+	if (last_step == 0) {
+		if (!PE_parse_boot_argn("adsp", &on, sizeof(on))) {
+			on = 1;         /* peridot: audio comes up by default; adsp=0 turns it off */
+		}
+		if (on != 1) {
+			return;
+		}
 	}
 	if (pe_arm_get_soc_base_phys() != HK_SOC_BASE) {
 		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");
