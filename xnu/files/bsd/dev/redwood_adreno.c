@@ -2051,6 +2051,10 @@ step_gmu_start(void)
 		printf("adreno: %u: the GMU's processor is not held in reset: not configuring it while it runs\n", step);
 		return false;
 	}
+	if (get(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL) != 0) {
+		/* an early stop may have left retention on; the processor is in reset here */
+		put(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL, 0);
+	}
 	if (get(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL) != 0 ||
 	    get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0) != 0 ||
 	    (get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS) & 1) != 0) {
