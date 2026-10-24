@@ -1745,7 +1745,7 @@ step_zap_signature(void)
 #define GMU_LOG_SIZE            0x4000u
 #define GMU_HFI_ADDRESS         0x60008000u
 #define GMU_STREAM              5
-#define GMU_MATCH               1               /* entry of the stream table; 0 is kept for the 3D core */
+#define GMU_MATCH               2               /* entry of the stream table; 0 and 1 are the 3D core's and its LPAC's */
 
 struct gmu_firmware_block {
 	uint32_t address, size, type, value;
