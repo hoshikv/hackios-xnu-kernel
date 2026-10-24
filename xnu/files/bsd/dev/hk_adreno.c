@@ -1799,7 +1799,7 @@ struct gmu_firmware_block {
 #define GMU_FIRMWARE_NEEDS      1               /* types of blocks without data: memory wanted, value = bytes */
 #define GMU_FIRMWARE_NEEDS_KEPT 7
 
-static struct gpu_space gmu_space = { .name = "the GMU", .context = 1 };
+static struct gpu_space gmu_space = { .name = "the GMU", .context = 0 };
 static struct gpu_block gmu_blocks[12], gmu_log, gmu_hfi;
 static unsigned gmu_block_count;
 static const uint8_t *gmu_firmware;
