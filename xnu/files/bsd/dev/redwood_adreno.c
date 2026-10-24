@@ -90,6 +90,9 @@
  * registers/adreno/a6xx{,_gmu}.xml, drivers/iommu/arm/arm-smmu/arm-smmu.h, drivers/soc/qcom/
  * cmd-db.c, drivers/firmware/qcom/qcom_scm{,-smc}.c, drivers/soc/qcom/mdt_loader.c. The phone's
  * vendor kernel agrees on every offset used here, and is the only source for the frequency counter.
+ *
+ * Peridot (SM8635, Cliffs) port in progress: steps 1 to 6 below carry this phone's GPU block
+ * addresses. The later steps still describe redwood and are not attempted until they are ported.
  */
 #include <kern/clock.h>
 #include <libkern/libkern.h>
@@ -105,6 +108,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
+#define PERIDOT_GPU_STEPS       6u              /* steps 1 to 6 are ported to the Cliffs GPU block; later ones are not */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -286,14 +290,14 @@ static struct block gcc = { "gcc", 0x00100000, 0x80000 };
 #define GCC_PLL_VOTE            0x52000         /* bit 15: gcc_gpu_gpll0_clk_src (600 MHz), bit 16: ..._div_clk_src (300 MHz) */
 #define GCC_PLL_VOTE_GPU_DIV    (1u << 16)
 #define GCC_GPU_CFG_AHB_CBCR    0x71004
-#define GCC_GPU_MEMNOC_GFX_CBCR 0x7100c
+#define GCC_GPU_MEMNOC_GFX_CBCR 0x71010
 #define GCC_GPU_SNOC_DVM_GFX_CBCR 0x71018
-#define GCC_DDRSS_GPU_AXI_CBCR  0x71154
+#define GCC_DDRSS_GPU_AXI_CBCR  0x7115c
 #define CBCR_ENABLE             (1u << 0)       /* a clock's control register: on */
 #define CBCR_OFF                (1u << 31)      /* ... and whether it is in fact off */
 
-/* dt: reserved-memory cmd_db@80860000: the boot loader's list of what RPMh can switch (cmd-db.c) */
-#define CMD_DB_PHYS             0x80860000UL
+/* dt: reserved-memory aop_cmd_db_region@81c60000: the boot loader's list of what RPMh can switch (cmd-db.c) */
+#define CMD_DB_PHYS             0x81c60000UL
 #define CMD_DB_SIZE             0x20000UL
 
 struct cmd_db_slave {
@@ -395,22 +399,21 @@ step_outside(void)
 	get(&gcc, "gpu_snoc_dvm_gfx", GCC_GPU_SNOC_DVM_GFX_CBCR);
 	get(&gcc, "ddrss_gpu_axi", GCC_DDRSS_GPU_AXI_CBCR);
 
-	announce("look up the GPU's supply rails in the boot loader's list of RPMh resources (memory at 0x80860000)");
-	show_rpmh_resource("gfx.lvl");          /* the 3D core's own rail (dt: VDD_GFX_LEVEL, PM8350C S7) */
-	show_rpmh_resource("cx.lvl");           /* the rail of the CX half, shared with most of the SoC */
-	show_rpmh_resource("mx.lvl");           /* memories */
+	announce("look up the GPU's supply rails in the boot loader's list of RPMh resources (memory at 0x81c60000)");
+	show_rpmh_resource("gfx.lvl");          /* the 3D core's own rail (dt: PMXR2230 S4) */
+	show_rpmh_resource("cx.lvl");           /* the rail of the CX half (dt: PM_V6C S1) */
+	show_rpmh_resource("mx.lvl");           /* memories (dt: PM_V8 S8) */
 	return true;
 }
 
 /* ---- step 2: the fuses ------------------------------------------------------------------------------- */
 
 /*
- * dt: qfprom@780000 with gpu_speed_bin@1e9 (two bytes, 8 bits from bit 5) and gpu_gaming_bin@1f5
- * (bit 5). Linux has the same cell 0x4000 further on, in the error-corrected copy of the fuses
- * (sc7280.dtsi: efuse@784000), and that is the copy it reads under this hypervisor on sibling
- * boards; so that one first.
+ * dt: qfprom@221c8000 (qcom,cliffs-qfprom), 0x1000 long. Peridot's device tree names no GPU
+ * speed-bin cell, so this step reads nothing and leaves speed_bin 0 for the steps that would
+ * need it (none of 1 to 6 do).
  */
-static struct block qfprom = { "qfprom", 0x00780000, 0x7000 };
+static struct block qfprom = { "qfprom", 0x221c8000, 0x1000 };
 #define QFPROM_CORRECTED        0x4000
 #define QFPROM_GPU_SPEED_BIN    0x1e9
 #define QFPROM_GPU_GAMING_BIN   0x1f5
@@ -434,6 +437,9 @@ static bool
 step_fuses(void)
 {
 	uint32_t bin, gaming;
+
+	announce("peridot's GPU fuse cell is not known yet: step 2 is skipped");
+	return true;
 
 	announce("read the GPU's fuses in the error-corrected copy (0x784000), which Linux reads");
 	bin = get8(&qfprom, "speed bin, low", QFPROM_CORRECTED + QFPROM_GPU_SPEED_BIN);
@@ -459,25 +465,23 @@ step_fuses(void)
  * registers answer only while gcc_gpu_cfg_ahb runs, which Linux turns on for good when it
  * starts (gcc-sc7280.c, the end of the probe function).
  */
-static struct block gpucc = { "gpucc", 0x03d90000, 0x9000 };
-#define GPUCC_PLL0_MODE         0x0000          /* the 3D core's PLL: bit 31 locked, bit 0 output on; +4: times 19.2 MHz */
-#define GPUCC_PLL1_MODE         0x0100          /* a 500 MHz PLL, an alternative source for the GMU's clock */
-#define GPUCC_CXO_AON_CBCR      0x1004
-#define GPUCC_GX_SW_RESET       0x1008          /* dt: gpu_gx_sw_reset */
-#define GPUCC_GX_GDSCR          0x100c          /* dt: gpu_gx_gdsc, the 3D core's power switch: the GMU's to operate */
-#define GPUCC_GX_GMU_CBCR       0x1064
-#define GPUCC_CX_GDSCR          0x106c          /* dt: gpu_cx_gdsc */
-#define GPUCC_AHB_CBCR          0x1078          /* gpu_cc_ahb_clk: the register bus inside the GPU block */
-#define GPUCC_CX_GMU_CBCR       0x1098          /* gpu_cc_cx_gmu_clk: the GMU */
-#define GPUCC_CXO_CBCR          0x109c          /* gpu_cc_cxo_clk: the crystal, for the GMU's timers */
-#define GPUCC_GMU_RCGR          0x1120          /* gpu_cc_gmu_clk_src: +0 command, +4 source and divider */
-#define GPUCC_CB_CBCR           0x1170          /* gpu_cc_cb_clk: Linux keeps it on always */
-#define GPUCC_HUB_AON_CBCR      0x1178          /* gpu_cc_hub_aon_clk */
-#define GPUCC_HUB_RCGR          0x117c          /* gpu_cc_hub_clk_src */
-#define GPUCC_HUB_CX_INT_CBCR   0x1204          /* gpu_cc_hub_cx_int_clk */
-#define GPUCC_CX_HW_CTRL        0x1540          /* dt: gpu_cx_hw_ctrl: bit 31 is where the vendor's driver sees CX come on */
-#define GPUCC_GX_DOMAIN_MISC    0x158c          /* dt: gpu_gx_domain_addr */
-#define GPUCC_SMMU_VOTE_CBCR    0x5000          /* gpu_cc_hlos1_vote_gpu_smmu_clk: our vote for the SMMU's clock */
+static struct block gpucc = { "gpucc", 0x03d90000, 0xa000 };
+#define GPUCC_PLL0_MODE         0x0000          /* gpu_cc_pll0: the 3D core's PLL, offsets from gpucc-cliffs.c */
+#define GPUCC_PLL1_MODE         0x1000          /* gpu_cc_pll1: the GMU's alternative source */
+#define GPUCC_CXO_AON_CBCR      0x9004          /* gpu_cc_cxo_aon_clk: kept on by Linux */
+#define GPUCC_GX_SW_RESET       0x9030          /* gpu_cc_gx_bcr: the 3D core's block reset */
+#define GPUCC_GX_GDSCR          0x9034          /* dt: gpu_cc_gx_gdsc, the 3D core's power switch */
+#define GPUCC_CX_GDSCR          0x908c          /* dt: gpu_cc_cx_gdsc */
+#define GPUCC_CX_HW_CTRL        0x90a0          /* dt: the hw-ctrl-addr page; bit 31 is CX's status */
+#define GPUCC_AHB_CBCR          0x90c8          /* gpu_cc_ahb_clk: the register bus inside the GPU block */
+#define GPUCC_CX_GMU_CBCR       0x90e4          /* gpu_cc_cx_gmu_clk: the GMU */
+#define GPUCC_CXO_CBCR          0x90f0          /* gpu_cc_cxo_clk: the crystal, for the GMU's timers */
+#define GPUCC_HUB_CX_INT_CBCR   0x90f4          /* gpu_cc_hub_cx_int_clk */
+#define GPUCC_MEMNOC_GFX_CBCR   0x90fc          /* gpu_cc_memnoc_gfx_clk */
+#define GPUCC_GMU_RCGR          0x9168          /* gpu_cc_gmu_clk_src: +0 command, +4 source and divider */
+#define GPUCC_HUB_AON_CBCR      0x9198          /* gpu_cc_hub_aon_clk */
+#define GPUCC_HUB_RCGR          0x919c          /* gpu_cc_hub_clk_src */
+#define GPUCC_SMMU_VOTE_CBCR    0x7000          /* gpu_cc_hlos1_vote_gpu_smmu_clk: our vote for the SMMU's clock */
 
 #define GDSC_SW_COLLAPSE        (1u << 0)       /* a power switch's control register (gdsc.c): off, by software */
 #define GDSC_HW_CONTROL         (1u << 1)       /* something else than software operates it */
@@ -499,7 +503,6 @@ step_gpucc(void)
 	get(&gpucc, "cx_hw_ctrl", GPUCC_CX_HW_CTRL);
 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
 	get(&gpucc, "gx_sw_reset", GPUCC_GX_SW_RESET);
-	get(&gpucc, "gx_domain_misc", GPUCC_GX_DOMAIN_MISC);
 	get(&gpucc, "pll0 mode", GPUCC_PLL0_MODE);
 	get(&gpucc, "pll0 multiplier", GPUCC_PLL0_MODE + 4);
 	get(&gpucc, "pll1 mode", GPUCC_PLL1_MODE);
@@ -509,11 +512,10 @@ step_gpucc(void)
 	get(&gpucc, "hub_clk_src command", GPUCC_HUB_RCGR);
 	get(&gpucc, "hub_clk_src source", GPUCC_HUB_RCGR + 4);
 	get(&gpucc, "cxo_aon", GPUCC_CXO_AON_CBCR);
-	get(&gpucc, "gx_gmu", GPUCC_GX_GMU_CBCR);
 	get(&gpucc, "ahb", GPUCC_AHB_CBCR);
 	get(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR);
 	get(&gpucc, "cxo", GPUCC_CXO_CBCR);
-	get(&gpucc, "cb", GPUCC_CB_CBCR);
+	get(&gpucc, "memnoc_gfx", GPUCC_MEMNOC_GFX_CBCR);
 	get(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR);
 	get(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR);
 	get(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR);
@@ -542,8 +544,6 @@ cx_is_on(void)
 	return (rd(gpucc.base + GPUCC_CX_GDSCR) | rd(gpucc.base + GPUCC_CX_HW_CTRL)) & GDSC_POWER_ON;
 }
 
-static void stale_stop(void);
-
 /*
  * The switch hangs on the rail "cx.lvl", which is up for as long as the SoC runs at all; the
  * vendor's driver (gdsc-regulator.c) clears the collapse bit and waits for bit 31 of the register
@@ -562,25 +562,23 @@ step_cx_power(void)
 	get(&gpucc, "cx_hw_ctrl", GPUCC_CX_HW_CTRL);
 	if (cx_is_on()) {
 		/*
-		 * A kernel that kept the GPU for the system to use (adreno_keep) leaves it running when
-		 * its run ends. What it left -- the GMU's processor, the 3D core's power, the GMU's
-		 * votes in RPMh, the SMMU's contexts pointing into memory that is somebody else's now --
-		 * is taken down as gpu_block_stop() would have, and the start is from nothing.
+		 * Peridot's early steps do not have a stop path yet: an earlier run in this loader
+		 * session leaves CX on, and the next run goes on with it. The 3D core must still be off.
 		 */
-		printf("adreno: %u: CX is on already: an earlier kernel left the GPU block running; stopping it first\n", step);
-		stale_stop();
-		if (cx_is_on()) {
-			printf("adreno: %u: CX stays on: going on with it as it is\n", step);
-			return true;
+		printf("adreno: %u: CX is on already: going on with it as it is\n", step);
+		if (rd(gpucc.base + GPUCC_GX_GDSCR) & GDSC_POWER_ON) {
+			printf("adreno: %u: THE 3D CORE HAS POWER ALREADY, left on by an earlier kernel: not usable until the "
+			    "phone is restarted\n", step);
+			return false;
 		}
-		gdscr = rd(gpucc.base + GPUCC_CX_GDSCR);
+		return true;
 	}
 	if (gdscr & GDSC_HW_CONTROL) {
 		printf("adreno: %u: the switch is under hardware control: not ours to operate\n", step);
 		return false;
 	}
 	put(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR, gdscr & ~GDSC_SW_COLLAPSE);
-	for (int i = 0; i < 500 && !cx_is_on(); i++) {
+	for (int i = 0; i < 5000 && !cx_is_on(); i++) {         /* up to 500 ms: gen7's CX rail is slower than redwood's */
 		sleep_us(100);
 	}
 	get(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR);
@@ -644,10 +642,9 @@ clock_source(const char *name, uint32_t rcgr, uint32_t source)
 static bool measure_clocks(void);
 
 /*
- * The clocks the device tree gives the GMU and the SMMU, at the rates both the vendor's driver
- * and Linux bring the GMU up with: 200 MHz for the GMU, 150 MHz for the "hub" (a6xx_gmu_resume).
- * Both come from the 300 MHz tap of the global 600 MHz PLL, which runs anyway: no PLL of the
- * GPU's own has to be started.
+ * The clocks the device tree gives the GMU and the SMMU: on gen7_11_0 the GMU runs at 200 MHz
+ * and the "hub" at 200 MHz (adreno-gpulist.h). Both come from the 300 MHz tap of the global
+ * 600 MHz PLL, which runs anyway: no PLL of the GPU's own has to be started.
  */
 static bool
 step_clocks(void)
@@ -667,19 +664,19 @@ step_clocks(void)
 		return false;
 	}
 
-	announce("in the GPU's clock controller: the GMU's clock to 200 MHz, the hub's to 150 MHz");
+	announce("in the GPU's clock controller: the GMU's clock to 200 MHz, the hub's to 200 MHz");
 	if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3)) ||       /* 300 MHz / 1.5 */
-	    !clock_source("hub_clk_src", GPUCC_HUB_RCGR, RCG_GPLL0_DIV(4))) {       /* 300 MHz / 2 */
+	    !clock_source("hub_clk_src", GPUCC_HUB_RCGR, RCG_GPLL0_DIV(3))) {       /* 300 MHz / 1.5 */
 		return false;
 	}
 
 	announce("in the GPU's clock controller: the clocks of the GMU and of the SMMU on");
-	if (!clock_on(&gpucc, "cb", GPUCC_CB_CBCR, false) ||
-	    !clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
+	if (!clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
 	    !clock_on(&gpucc, "ahb", GPUCC_AHB_CBCR, false) ||
 	    !clock_on(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR, true) ||
 	    !clock_on(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR, true) ||
 	    !clock_on(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR, true) ||
+	    !clock_on(&gpucc, "memnoc_gfx", GPUCC_MEMNOC_GFX_CBCR, false) ||
 	    !clock_on(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR, false)) {
 		return false;
 	}
@@ -695,31 +692,30 @@ step_clocks(void)
  * result as "clk_measure"; registers, selections and procedure are its debugcc-yupik.c and
  * clk-debug.c (mainline Linux has no counterpart).
  */
-#define GCC_DEBUG_MUX           0x62000         /* [9:0] which clock goes to the counter */
-#define GCC_DEBUG_MUX_GPUCC     0x146           /* ... the debug output of the GPU's clock controller */
-#define GCC_DEBUG_DIV           0x62004         /* [3:0] divider - 1; both controllers divide by 2 */
-#define GCC_DEBUG_CBCR          0x62008
-#define GCC_XO_DIV4_CBCR        0x6200c         /* the counter's time base: the crystal / 4, 4.8 MHz */
-#define GCC_MEASURE_CTL         0x62038         /* [19:0] how many ticks of the time base to count for */
+#define GCC_DEBUG_MUX           0x62024         /* [9:0] which clock goes to the counter */
+#define GCC_DEBUG_MUX_GPUCC     0x17d           /* ... the debug output of the GPU's clock controller */
+#define GCC_DEBUG_DIV           0x62000         /* [3:0] divider - 1; both controllers divide by 2 */
+#define GCC_DEBUG_CBCR          0x62004
+#define GCC_XO_DIV4_CBCR        0x62008         /* the counter's time base: the crystal / 4, 4.8 MHz */
+#define GCC_MEASURE_CTL         0x62048         /* [19:0] how many ticks of the time base to count for */
 #define MEASURE_RUN             (1u << 20)
 #define MEASURE_CLEAR           (1u << 21)
-#define GCC_MEASURE_STATUS      0x6203c         /* [24:0] the count */
+#define GCC_MEASURE_STATUS      0x6204c         /* [24:0] the count */
 #define MEASURE_DONE            (1u << 25)
 #define MEASURE_BRIEF           0x1000          /* ticks: a millisecond */
 #define MEASURE_FULL            0x20000         /* 27 ms */
 #define MEASURE_FAILED          0xffffffffu
-#define GPUCC_DEBUG_DIV         0x10fc
-#define GPUCC_DEBUG_CBCR        0x1100
-#define GPUCC_DEBUG_MUX         0x1568          /* [7:0] which of the GPU's clocks */
+#define GPUCC_DEBUG_DIV         0x9140
+#define GPUCC_DEBUG_CBCR        0x9144
+#define GPUCC_DEBUG_MUX         0x9564          /* [7:0] which of the GPU's clocks */
 #define GPUCC_DEBUG_CXO_AON     0x0b
-#define GPUCC_DEBUG_GX_GFX3D    0x0d            /* the 3D core's own clock */
-#define GPUCC_DEBUG_GX_GMU      0x11
-#define GPUCC_DEBUG_AHB         0x12
-#define GPUCC_DEBUG_CX_GMU      0x1a
-#define GPUCC_DEBUG_CXO         0x1b
-#define GPUCC_DEBUG_HUB_CX_INT  0x1c
-#define GPUCC_DEBUG_CB          0x26
-#define GPUCC_DEBUG_HUB_AON     0x27
+#define GPUCC_DEBUG_GX_GFX3D    0x0e            /* the 3D core's own clock */
+#define GPUCC_DEBUG_GX_GMU      0x11            /* redwood only; later steps are not ported */
+#define GPUCC_DEBUG_AHB         0x16
+#define GPUCC_DEBUG_CX_GMU      0x1d
+#define GPUCC_DEBUG_CXO         0x1e
+#define GPUCC_DEBUG_HUB_CX_INT  0x1f
+#define GPUCC_DEBUG_HUB_AON     0x2d
 
 /* Let the counter run for so many ticks of its time base; what it counted of the clock on its input. */
 static uint32_t
@@ -804,14 +800,14 @@ measure_clocks(void)
 		const char *name;
 		uint32_t select;
 	} clocks[] = {
-		{ "cx_gmu (200 MHz was asked for)", GPUCC_DEBUG_CX_GMU }, { "hub_cx_int (from 150 MHz)", GPUCC_DEBUG_HUB_CX_INT },
-		{ "hub_aon", GPUCC_DEBUG_HUB_AON }, { "cb", GPUCC_DEBUG_CB }, { "cxo_aon", GPUCC_DEBUG_CXO_AON },
-		{ "gx_gmu (should be off)", GPUCC_DEBUG_GX_GMU }, { "ahb, THE ONE IN QUESTION,", GPUCC_DEBUG_AHB },
+		{ "cx_gmu (200 MHz was asked for)", GPUCC_DEBUG_CX_GMU }, { "hub_cx_int (from 200 MHz)", GPUCC_DEBUG_HUB_CX_INT },
+		{ "hub_aon", GPUCC_DEBUG_HUB_AON }, { "cxo_aon", GPUCC_DEBUG_CXO_AON },
+		{ "gx_gfx3d (should be off)", GPUCC_DEBUG_GX_GFX3D }, { "ahb, THE ONE IN QUESTION,", GPUCC_DEBUG_AHB },
 	};
 	uint32_t hz, ahb_hz = MEASURE_FAILED;
 
-	announce("measure the GPU block's clocks with the SoC's frequency counter (debug registers at gcc 0x162000.., "
-	    "gpucc 0x3d910fc, 0x3d91100, 0x3d91568)");
+	announce("measure the GPU block's clocks with the SoC's frequency counter (debug registers at gcc 0x62000.., "
+	    "gpucc 0x3d99140, 0x3d99144, 0x3d99564)");
 	hz = measure(GPUCC_DEBUG_CXO);
 	if (hz == MEASURE_FAILED) {
 		printf("adreno: %u: the counter did not finish: it cannot be used as it is set up here\n", step);
@@ -885,27 +881,28 @@ cx_ready(void)
 /* ---- step 6: the first words from the GPU block ------------------------------------------------------- */
 
 /*
- * dt: qcom,gmu "kgsl_gmu_reg" at 0x3d6a000, 0x34000 long. Offsets in a6xx_gmu.xml are in words.
+ * dt: qcom,gmu "gmu" at 0x3d68000, 0x37000 long. Gen7 offsets in gen7_reg.h are absolute words
+ * from the kgsl base 0x3d00000, not from the GMU block: 0x1f800 is 0x3d7e000.
  */
-static struct block gmu = { "gmu", 0x03d6a000, 0x34000 };
-#define GMU_WORD(n)             (4u * (n))
-#define GMU_DTCM                GMU_WORD(0x1c00)        /* the processor's 16K of data memory (its code: 0x0c00) */
-#define GMU_DTCM_VERSIONS       GMU_WORD(0x1c00 + 0xff8) /* five words where loaded firmware carries its versions */
-#define GMU_CM3_SYSRESET        GMU_WORD(0x5000)        /* 1: the processor is held in reset */
-#define GMU_CM3_BOOT_CONFIG     GMU_WORD(0x5001)
-#define GMU_CM3_FW_INIT_RESULT  GMU_WORD(0x501c)        /* 0xbabeface once firmware has started */
-#define GMU_CM3_CFG             GMU_WORD(0x502d)
-#define GMU_ALWAYS_ON_COUNTER_L GMU_WORD(0x5088)        /* counts the 19.2 MHz crystal */
-#define GMU_ALWAYS_ON_COUNTER_H GMU_WORD(0x5089)
-#define GMU_SPTPRAC_PWR_CLK_STATUS GMU_WORD(0x50d0)     /* bit 6: the 3D core has no power, bit 7: no clock */
-#define GMU_RPMH_POWER_STATE    GMU_WORD(0x50ec)
-#define GMU_HFI_CTRL_STATUS     GMU_WORD(0x5180)
-#define GMU_HFI_VERSION_INFO    GMU_WORD(0x5181)
-#define GMU_GENERAL_7           GMU_WORD(0x51cc)
-#define GMU_AO_HOST_INTERRUPT_STATUS GMU_WORD(0x9305)
-#define GMU_RSCC_CONTROL_ACK    GMU_WORD(0x9308)
-#define GMU_AO_GPU_CX_BUSY_STATUS GMU_WORD(0x930c)
-#define GMU_AHB_FENCE_STATUS    GMU_WORD(0x9313)
+static struct block gmu = { "gmu", 0x03d68000, 0x37000 };
+#define GMU_WORD(n)             (4u * (n) - 0x68000u)
+#define GMU_DTCM                GMU_WORD(0x1c00)        /* redwood only: gen7's TCM is described by firmware */
+#define GMU_DTCM_VERSIONS       GMU_WORD(0x1c00 + 0xff8)
+#define GMU_CM3_SYSRESET        GMU_WORD(0x1f800)       /* 1: the processor is held in reset */
+#define GMU_CM3_BOOT_CONFIG     GMU_WORD(0x1f801)
+#define GMU_CM3_FW_INIT_RESULT  GMU_WORD(0x1f81c)       /* 0xbabeface once firmware has started */
+#define GMU_CM3_CFG             GMU_WORD(0x1f82d)
+#define GMU_ALWAYS_ON_COUNTER_L GMU_WORD(0x1f880)       /* counts the 19.2 MHz crystal */
+#define GMU_ALWAYS_ON_COUNTER_H GMU_WORD(0x1f881)
+#define GMU_SPTPRAC_PWR_CLK_STATUS GMU_WORD(0x50d0)     /* redwood only; not read in the early steps */
+#define GMU_RPMH_POWER_STATE    GMU_WORD(0x1f8ec)
+#define GMU_HFI_CTRL_STATUS     GMU_WORD(0x1f980)
+#define GMU_HFI_VERSION_INFO    GMU_WORD(0x5181)        /* redwood only */
+#define GMU_GENERAL_7           GMU_WORD(0x1f9cc)
+#define GMU_AO_HOST_INTERRUPT_STATUS GMU_WORD(0x23b05)
+#define GMU_RSCC_CONTROL_ACK    GMU_WORD(0x23b08)
+#define GMU_AO_GPU_CX_BUSY_STATUS GMU_WORD(0x23b0c)
+#define GMU_AHB_FENCE_STATUS    GMU_WORD(0x23b13)
 
 /*
  * dt: qcom,kgsl-3d0 "kgsl_3d0_reg_memory" at 0x3d00000 is the 3D core, and without power (the GMU
@@ -930,16 +927,14 @@ step_first_words(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read registers of the GMU (0x3d6a000): the first words from the GPU block itself");
+	announce("read registers of the GMU (0x3d68000): the first words from the GPU block itself");
 	get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET);
 	get(&gmu, "cm3_boot_config", GMU_CM3_BOOT_CONFIG);
 	get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT);
 	get(&gmu, "cm3_cfg", GMU_CM3_CFG);
 	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
-	get(&gmu, "hfi_version_info", GMU_HFI_VERSION_INFO);
 	get(&gmu, "general_7", GMU_GENERAL_7);
 	get(&gmu, "rpmh_power_state", GMU_RPMH_POWER_STATE);
-	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);
 	get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
 	get(&gmu, "ao_gpu_cx_busy_status", GMU_AO_GPU_CX_BUSY_STATUS);
 	get(&gmu, "ahb_fence_status", GMU_AHB_FENCE_STATUS);
@@ -953,10 +948,6 @@ step_first_words(void)
 	hz = nanos ? (uint32_t)((uint64_t)hz * NSEC_PER_SEC / nanos) : 0;
 	printf("adreno: %u: the GMU's counter counts at %u Hz: %s\n", step, hz, hz > 18000000 && hz < 20500000 ?
 	    "the 19.2 MHz crystal: THE GPU BLOCK IS ALIVE" : "not the crystal's 19.2 MHz (firmware may start it): see the rest");
-	for (uint32_t i = 0; i < 5; i++) {
-		get(&gmu, "dtcm, where firmware has its versions", GMU_DTCM_VERSIONS + 4 * i);
-	}
-
 	announce("read the GPU's bus interface (0x3d0f000) and the CX odds and ends (0x3d9e000)");
 	get(&gbif, "scache_cntl0", GBIF_SCACHE_CNTL0);
 	get(&gbif, "halt", GBIF_HALT);
@@ -2180,7 +2171,6 @@ gmu_post_mortem(void)
 	rscc_show();
 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
 	get(&gpucc, "gx_sw_reset", GPUCC_GX_SW_RESET);
-	get(&gpucc, "gx_domain_misc", GPUCC_GX_DOMAIN_MISC);
 	get(&gpucc, "pll0 mode", GPUCC_PLL0_MODE);
 	get(&gpucc, "pll0 multiplier", GPUCC_PLL0_MODE + 4);
 	get(&gpucc, "pll1 mode", GPUCC_PLL1_MODE);
@@ -2969,35 +2959,6 @@ gx_off(void)
 		wait_for(&gpucc, GPUCC_GX_GDSCR, GDSC_POWER_ON, 0, 100);
 		get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
 	}
-}
-
-/* What step 4 does when it finds the GPU block running: see there. Nothing here has been set up by this kernel. */
-static void
-stale_stop(void)
-{
-	need(&gmu);
-	need(&rscc);
-	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
-	gx_off();
-	if (rd(rscc.base + RSCC_SEQ_MEM_0_DRV0) == 0xeaaae5a0 && !(rd(rscc.base + RSCC_RSC_STATUS0_DRV0) & RSCC_ASLEEP)) {
-		put(&gmu, "rscc_control_req", GMU_RSCC_CONTROL_REQ, 1);
-		wait_for(&rscc, RSCC_RSC_STATUS0_DRV0, RSCC_ASLEEP, RSCC_ASLEEP, 100);
-		get(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0);
-		put(&gmu, "rscc_control_req", GMU_RSCC_CONTROL_REQ, 0);
-	}
-	if (smmu_layout()) {
-		for (uint32_t match = 0; match < 3; match++) {
-			put(&smmu, "smr", SMMU_SMR(match), 0);
-			put(&smmu, "s2cr", SMMU_S2CR(match), SMMU_S2CR_FAULT);
-			put(&smmu, "cb sctlr", (smmu_pages + match) * smmu_page + SMMU_CB_SCTLR, 0);
-		}
-	}
-	put(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR, rd(gpucc.base + GPUCC_CX_GDSCR) | GDSC_SW_COLLAPSE);
-	for (int i = 0; i < 1000 && cx_is_on(); i++) {
-		sleep_us(100);
-	}
-	get(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR);
-	get(&gpucc, "cx_hw_ctrl", GPUCC_CX_HW_CTRL);
 }
 
 /*
@@ -4054,6 +4015,10 @@ redwood_adreno_init(void)
 	}
 	if (last_step > STEPS) {
 		last_step = STEPS;
+	}
+	if (last_step > PERIDOT_GPU_STEPS) {
+		printf("adreno: peridot: only steps 1 to %u are ported; not attempting the rest\n", PERIDOT_GPU_STEPS);
+		last_step = PERIDOT_GPU_STEPS;
 	}
 	PE_parse_boot_argn("adreno_watch", &watch_seconds, sizeof(watch_seconds));
 	for (newest_step = last_step; newest_step > 0 && (skip_steps & 1u << newest_step); newest_step--) {
