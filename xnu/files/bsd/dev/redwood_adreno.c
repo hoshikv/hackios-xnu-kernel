@@ -108,7 +108,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
-#define PERIDOT_GPU_STEPS       14u             /* steps 1 to 14 are ported to the Cliffs GPU block; later ones are not */
+#define PERIDOT_GPU_STEPS       15u             /* steps 1 to 15 are ported to the Cliffs GPU block; later ones are not */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -1933,30 +1933,45 @@ step_gmu_firmware(void)
 
 /* ---- step 15: start the GMU ---------------------------------------------------------------------------- */
 
-#define GMU_ICACHE_CONFIG       GMU_WORD(0x4c00)
-#define GMU_DCACHE_CONFIG       GMU_WORD(0x4c01)
-#define GMU_SYS_BUS_CONFIG      GMU_WORD(0x4c0f)
-#define GMU_PWR_COL_INTER_FRAME_CTRL GMU_WORD(0x50c0)
-#define GMU_RPMH_CTRL           GMU_WORD(0x50e8)
-#define GMU_RPMH_CTRL_ALL       0xf11           /* the RPMh interface, and every vote the firmware may cast */
-#define GMU_CX_FAL_INTF         GMU_WORD(0x50f0)
-#define GMU_CX_FALNEXT_INTF     GMU_WORD(0x50f1)
-#define GMU_PWR_COL_CP_MSG      GMU_WORD(0x5100)        /* at start: where the log is, and its pages - 1 */
-#define GMU_PWR_COL_CP_RESP     GMU_WORD(0x5101)        /* ... and how far it was written before */
-#define GMU_HFI_SFR_ADDR        GMU_WORD(0x5182)        /* at start: which GPU this is */
-#define GMU_HFI_QTBL_INFO       GMU_WORD(0x5184)
-#define GMU_HFI_QTBL_ADDR       GMU_WORD(0x5185)
-#define GMU_HFI_CTRL_INIT       GMU_WORD(0x5186)
-#define GMU_GMU2HOST_INTR_CLR   GMU_WORD(0x5191)
-#define GMU_GMU2HOST_INTR_INFO  GMU_WORD(0x5192)        /* bit 0: a message for us; bit 31: the 3D core is ours */
-#define GMU_HOST2GMU_INTR_SET   GMU_WORD(0x5194)        /* bit 0: a message for the GMU; bit 30, 31: see step 17 */
-#define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x9307)
-#define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x9310)
-#define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x9311)
-#define GMU_CHIP                0x06035000      /* dt qcom,chipid 0x06030500 the way the firmware wants it */
+/*
+ * The gen7 GMU's registers are absolute words of the kgsl window (GMU_WORD), not
+ * redwood's 0x50xx block: the log and chip id go to GENERAL_8 and GENERAL_10,
+ * the HFI table to HFI_QTBL_ADDR, and the caches to 0x1f40x. The cold-start
+ * order is ShengGmu's: RSCC/PDC, the two FAL interfaces, TCM retention, the
+ * configuration words, then release CM3 and wait for FW and HFI.
+ */
+#define GMU_ICACHE_CONFIG       GMU_WORD(0x1f400)
+#define GMU_DCACHE_CONFIG       GMU_WORD(0x1f401)
+#define GMU_SYS_BUS_CONFIG      GMU_WORD(0x1f40f)
+#define GMU_CX_FAL_INTF         GMU_WORD(0x1f8f0)
+#define GMU_CX_FALNEXT_INTF     GMU_WORD(0x1f8f1)
+#define GMU_HFI_QTBL_INFO       GMU_WORD(0x1f984)
+#define GMU_HFI_QTBL_ADDR       GMU_WORD(0x1f985)
+#define GMU_HFI_CTRL_INIT       GMU_WORD(0x1f986)
+#define GMU_GMU2HOST_INTR_CLR   GMU_WORD(0x1f991)
+#define GMU_GMU2HOST_INTR_INFO  GMU_WORD(0x1f992)
+#define GMU_HOST2GMU_INTR_SET   GMU_WORD(0x1f994)
+#define GMU_GENERAL_8           GMU_WORD(0x1f9cd)
+#define GMU_GENERAL_9           GMU_WORD(0x1f9ce)
+#define GMU_GENERAL_10          GMU_WORD(0x1f9cf)
+#define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x23b11)
+#define GMU_CHIP                0x07110000u     /* a7xx gen1 gmu_chipid, as a735/a730 */
 #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
 #define GMU_STARTED             0x100
 #define GMU_FAILED              0xe00
+
+#define CX_MISC_TCM_RET_CNTL    (4 * 0x39)
+#define RSCC_HIDDEN_TCS_CMD0_ADDR (4 * 0x00d)
+#define RSCC_HIDDEN_TCS_CMD0_DATA (4 * 0x00e)
+#define RSCC_OVERRIDE_START_ADDR (4 * 0x100)
+#define RSCC_PDC_SEQ_START_ADDR (4 * 0x008)
+#define RSCC_PDC_MATCH_VALUE_LO (4 * 0x009)
+#define RSCC_PDC_MATCH_VALUE_HI (4 * 0x00a)
+#define RSCC_SEQ_MEM_0_A735     (4 * 0x154)     /* GEN7_2_0_RSCC_SEQ_MEM_0_DRV0 */
+#define PDC_GPU_ENABLE          (4 * 0x1140)
+#define PDC_GPU_SEQ_START_ADDR  (4 * 0x1148)
+#define GBIF_QSB_SIDE(n)        (4 * (0x03 + (n)))
+static struct block pdc_gen7 = { "pdc", 0x0b280000, 0x10000 };
 
 /* The table at the head of the HFI page and the three queues after it, as the vendor's driver lays them out. */
 struct hfi_queue {
@@ -1972,15 +1987,39 @@ struct hfi_table {
 
 static volatile struct hfi_table *hfi;  /* the uncached view */
 
-/*
- * Everything the vendor's driver writes before it lets the processor go (a6xx_gmu_register_config,
- * a6xx_gmu_power_config), in its order; then out of reset (a6xx_gmu_device_start).
- */
+/* The A740/A735 sequencer program from gen7_load_rsc_ucode and gen7_load_pdc_ucode. */
+static void
+gmu_rsc_setup(void)
+{
+	put(&rscc, "rsc_status0", RSCC_RSC_STATUS0_DRV0, 1u << 24);
+	put(&rscc, "pdc_slave_id", RSCC_PDC_SLAVE_ID_DRV0, 1);
+	put(&rscc, "hidden tcs data 0", RSCC_HIDDEN_TCS_CMD0_DATA, 0);
+	put(&rscc, "hidden tcs addr 0", RSCC_HIDDEN_TCS_CMD0_ADDR, 0);
+	put(&rscc, "hidden tcs data 1", RSCC_HIDDEN_TCS_CMD0_DATA + 8, 0);
+	put(&rscc, "hidden tcs addr 1", RSCC_HIDDEN_TCS_CMD0_ADDR + 8, 0);
+	put(&rscc, "hidden tcs data 2", RSCC_HIDDEN_TCS_CMD0_DATA + 16, 0x80000021);
+	put(&rscc, "hidden tcs addr 2", RSCC_HIDDEN_TCS_CMD0_ADDR + 16, 0);
+	put(&rscc, "override start", RSCC_OVERRIDE_START_ADDR, 0);
+	put(&rscc, "pdc seq start", RSCC_PDC_SEQ_START_ADDR, 0x4520);
+	put(&rscc, "pdc match lo", RSCC_PDC_MATCH_VALUE_LO, 0x4510);
+	put(&rscc, "pdc match hi", RSCC_PDC_MATCH_VALUE_HI, 0x4514);
+	put(&rscc, "seq mem 0", RSCC_SEQ_MEM_0_A735, 0xeaaae5a0);
+	put(&rscc, "seq mem 1", RSCC_SEQ_MEM_0_A735 + 4, 0xe1a1ebab);
+	put(&rscc, "seq mem 2", RSCC_SEQ_MEM_0_A735 + 8, 0xa2e0a581);
+	put(&rscc, "seq mem 3", RSCC_SEQ_MEM_0_A735 + 12, 0xecac82e2);
+	put(&rscc, "seq mem 4", RSCC_SEQ_MEM_0_A735 + 16, 0x0020edad);
+	put(&pdc_gen7, "seq start", PDC_GPU_SEQ_START_ADDR, 0);
+	put(&pdc_gen7, "enable", PDC_GPU_ENABLE, 0x80000001);
+}
+
 static bool
 step_gmu_start(void)
 {
 	static const uint8_t priority[HFI_QUEUES] = { 10, 10, 40 };
-	uint32_t result = 0;
+	static const uint32_t config_regs[] = { GMU_CM3_FW_INIT_RESULT, GMU_CM3_BOOT_CONFIG, GMU_HFI_QTBL_ADDR,
+	    GMU_HFI_QTBL_INFO, GMU_CM3_CFG, GMU_GENERAL_10, GMU_GENERAL_8, GMU_AHB_FENCE_RANGE_0, GMU_SYS_BUS_CONFIG,
+	    GMU_ICACHE_CONFIG, GMU_DCACHE_CONFIG };
+	uint32_t config_values[sizeof(config_regs) / sizeof(config_regs[0])], result = 0, version, mask, ready;
 
 	if (!cx_ready() || !gmu_space_is_on) {
 		return false;
@@ -2001,52 +2040,65 @@ step_gmu_start(void)
 		hfi->queue[i].status = 1;
 	}
 
-	announce("tell the GMU where things are, by its registers: the message table, the log, which GPU this is; its "
-	    "caches and its use of RPMh; then let its processor out of reset");
+	announce("start the GMU: its RPMh/PDC program, retention, log and HFI addresses, caches, then out of reset");
 	if (get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET) != 1) {
 		printf("adreno: %u: the GMU's processor is not held in reset: not configuring it while it runs\n", step);
 		return false;
 	}
-	/*
-	 * Our own leaving (gpu_block_stop) hands the GMU's RPMh channel to the always-on sequencer, and
-	 * until it is taken back nothing the GMU asks of RPMh gets there: the vendor's
-	 * a6xx_rscc_wakeup_sequence, before the firmware starts.
-	 */
-	rscc_show();
-	if (rd(rscc.base + RSCC_RSC_STATUS0_DRV0) & RSCC_ASLEEP) {
-		put(&gmu, "rscc_control_req", GMU_RSCC_CONTROL_REQ, 2);
-		if (!wait_for(&gmu, GMU_RSCC_CONTROL_ACK, 2, 2, 100) || !wait_for(&rscc, RSCC_SEQ_BUSY_DRV0, ~0u, 0, 100)) {
-			printf("adreno: %u: the GMU's RPMh channel does not wake\n", step);
-		}
-		get(&gmu, "rscc_control_ack", GMU_RSCC_CONTROL_ACK);
-		put(&gmu, "rscc_control_req", GMU_RSCC_CONTROL_REQ, 0);
-		get(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0);
-		get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0);
+	if (get(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL) != 0 ||
+	    get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0) != 0 ||
+	    (get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS) & 1) != 0) {
+		printf("adreno: %u: the GMU is not in the state ShengGmu requires before start\n", step);
+		return false;
 	}
-	rsc_awake = true;
+	rscc_show();
+	gmu_rsc_setup();
 	put(&gmu, "cx_falnext_intf", GMU_CX_FALNEXT_INTF, 1);
 	put(&gmu, "cx_fal_intf", GMU_CX_FAL_INTF, 1);
-	put(&gmu, "general_7", GMU_GENERAL_7, 1);
-	put(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT, 0);
-	put(&gmu, "cm3_boot_config", GMU_CM3_BOOT_CONFIG, 2);
-	put(&gmu, "hfi_qtbl_addr", GMU_HFI_QTBL_ADDR, GMU_HFI_ADDRESS);
-	put(&gmu, "hfi_qtbl_info", GMU_HFI_QTBL_INFO, 1);
-	put(&gmu, "ahb_fence_range_0", GMU_AHB_FENCE_RANGE_0, 1u << 31 | (0xa << 2) << 18 | 0x8a0);
-	put(&gmu, "cm3_cfg", GMU_CM3_CFG, 0x4052);
-	put(&gbif, "halt", GBIF_HALT, 0);
-	put(&gmu, "pwr_col_cp_resp", GMU_PWR_COL_CP_RESP, 0);
-	put(&gmu, "hfi_sfr_addr", GMU_HFI_SFR_ADDR, GMU_CHIP);
-	put(&gmu, "pwr_col_cp_msg", GMU_PWR_COL_CP_MSG, GMU_LOG_ADDRESS | (GMU_LOG_SIZE / 4096 - 1));
-	put(&gmu, "sys_bus_config", GMU_SYS_BUS_CONFIG, 1);
-	put(&gmu, "icache_config", GMU_ICACHE_CONFIG, 1);
-	put(&gmu, "dcache_config", GMU_DCACHE_CONFIG, 1);
-	put(&gmu, "pwr_col_inter_frame_ctrl", GMU_PWR_COL_INTER_FRAME_CTRL, 0x9c40400);
-	set(&gmu, "rpmh_ctrl", GMU_RPMH_CTRL, GMU_RPMH_CTRL_ALL);
-	put(&gmu, "gmu2host_intr_clr", GMU_GMU2HOST_INTR_CLR, 0xffffffff);
+	put(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL, 1);
+	if (get(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL) != 1) {
+		printf("adreno: %u: the GMU's TCM retention does not latch\n", step);
+		return false;
+	}
 
+	config_values[0] = 0;
+	config_values[1] = 2;
+	config_values[2] = GMU_HFI_ADDRESS;
+	config_values[3] = 1;
+	config_values[4] = 0x4052;
+	config_values[5] = GMU_CHIP;
+	config_values[6] = GMU_LOG_ADDRESS | 3;
+	config_values[7] = 1u << 31 | 0x32 << 18 | 0x8a0;
+	config_values[8] = 1;
+	config_values[9] = 1;
+	config_values[10] = 1;
+	for (unsigned i = 0; i < sizeof(config_regs) / sizeof(config_regs[0]); i++) {
+		put(&gmu, "config", config_regs[i], config_values[i]);
+	}
+	put(&gbif, "halt", GBIF_HALT, 0);
+	for (unsigned i = 0; i < 4; i++) {
+		put(&gbif, "qsb side", GBIF_QSB_SIDE(i), 0x71620);
+	}
+	put(&gmu, "gmu2host_intr_clr", GMU_GMU2HOST_INTR_CLR, 0xffffffff);
+	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
+	put(&gmu, "general_9", GMU_GENERAL_9, 0);
+	settle();
+
+	version = rd(gmu.base + GMU_DTCM_VERSIONS);
+	mask = version <= 0x20010004 ? ~0u : GMU_STARTED_MASK;
+	ready = mask == ~0u ? 0xbabeface : GMU_STARTED;
+	for (unsigned i = 0; i < sizeof(config_regs) / sizeof(config_regs[0]); i++) {
+		uint32_t was = rd(gmu.base + config_regs[i]);
+		if (was != config_values[i]) {
+			printf("adreno: %u: the GMU register at %#x did not keep %#x (is %#x)\n", step, config_regs[i],
+			    config_values[i], was);
+			return false;
+		}
+	}
 	gmu_runs = true;
 	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 0);
-	for (int i = 0; i < 5000 && (result & GMU_STARTED_MASK) != GMU_STARTED && !(result & GMU_FAILED); i++) {
+	settle();
+	for (int i = 0; i < 5000 && (result & mask) != ready && !(result & GMU_FAILED); i++) {
 		sleep_us(100);
 		result = rd(gmu.base + GMU_CM3_FW_INIT_RESULT);
 	}
@@ -2054,12 +2106,20 @@ step_gmu_start(void)
 	get(&gmu, "gmu2host_intr_info", GMU_GMU2HOST_INTR_INFO);
 	get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
 	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
-	if (space_faulted(&gmu_space) || (result & GMU_STARTED_MASK) != GMU_STARTED) {
-		printf("adreno: %u: the GMU's firmware does not come up\n", step);
+	if (space_faulted(&gmu_space) || (result & mask) != ready) {
+		printf("adreno: %u: the GMU's firmware does not come up (result %#x, want %#x)\n", step, result, ready);
 		gmu_post_mortem();
 		return false;
 	}
 	printf("adreno: %u: THE GMU'S FIRMWARE RUNS\n", step);
+	put(&gmu, "hfi_ctrl_init", GMU_HFI_CTRL_INIT, 1);
+	settle();
+	if (!wait_for(&gmu, GMU_HFI_CTRL_STATUS, 1, 1, 500)) {
+		printf("adreno: %u: the GMU's HFI does not answer\n", step);
+		gmu_post_mortem();
+		return false;
+	}
+	printf("adreno: %u: THE GMU'S HFI ANSWERS\n", step);
 	return true;
 }
 
