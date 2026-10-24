@@ -895,7 +895,7 @@ static struct block gmu = { "gmu", 0x03d68000, 0x37000 };
 #define GMU_CM3_CFG             GMU_WORD(0x1f82d)
 #define GMU_ALWAYS_ON_COUNTER_L GMU_WORD(0x1f880)       /* counts the 19.2 MHz crystal */
 #define GMU_ALWAYS_ON_COUNTER_H GMU_WORD(0x1f881)
-#define GMU_SPTPRAC_PWR_CLK_STATUS GMU_WORD(0x50d0)     /* redwood only; not read in the early steps */
+#define GMU_SPTPRAC_PWR_CLK_STATUS GMU_WORD(0x1f8d0)    /* gen7: GFX_PWR_CLK_STATUS, bit 6/7 as before */
 #define GMU_RPMH_POWER_STATE    GMU_WORD(0x1f8ec)
 #define GMU_HFI_CTRL_STATUS     GMU_WORD(0x1f980)
 #define GMU_HFI_VERSION_INFO    GMU_WORD(0x5181)        /* redwood only */
