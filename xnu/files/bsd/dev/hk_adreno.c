@@ -110,6 +110,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
 #define PERIDOT_GPU_STEPS       15u             /* steps 1 to 15 are ported to the Cliffs GPU block; later ones are not */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
+static uint32_t gmu_chip = 0x07110000u;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
@@ -2075,7 +2076,7 @@ step_gmu_start(void)
 	config_values[2] = GMU_HFI_ADDRESS;
 	config_values[3] = 1;
 	config_values[4] = 0x4052;
-	config_values[5] = GMU_CHIP;
+	config_values[5] = gmu_chip;
 	config_values[6] = GMU_LOG_ADDRESS | 3;
 	config_values[7] = 1u << 31 | 0x32 << 18 | 0x8a0;
 	config_values[8] = 1;
@@ -4172,6 +4173,7 @@ hk_adreno_init(void)
 	PE_parse_boot_argn("adreno_fine", &fine, sizeof(fine));
 	PE_parse_boot_argn("adreno_gmu_skip", &gmu_skip, sizeof(gmu_skip));
 	PE_parse_boot_argn("adreno_aperture_reg", &aperture_reg, sizeof(aperture_reg));
+	PE_parse_boot_argn("adreno_chip", &gmu_chip, sizeof(gmu_chip));
 	if (last_step == 0) {
 		return;                                 /* (adreno=0: the GPU is left alone) */
 	}
