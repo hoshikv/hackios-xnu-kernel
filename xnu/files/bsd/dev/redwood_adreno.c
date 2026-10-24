@@ -108,7 +108,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
-#define PERIDOT_GPU_STEPS       6u              /* steps 1 to 6 are ported to the Cliffs GPU block; later ones are not */
+#define PERIDOT_GPU_STEPS       10u             /* steps 1 to 10 are ported to the Cliffs GPU block; later ones are not */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -886,8 +886,8 @@ cx_ready(void)
  */
 static struct block gmu = { "gmu", 0x03d68000, 0x37000 };
 #define GMU_WORD(n)             (4u * (n) - 0x68000u)
-#define GMU_DTCM                GMU_WORD(0x1c00)        /* redwood only: gen7's TCM is described by firmware */
-#define GMU_DTCM_VERSIONS       GMU_WORD(0x1c00 + 0xff8)
+#define GMU_DTCM                GMU_WORD(0x1c400)       /* gen7: 16K data TCM after the 16K instruction TCM */
+#define GMU_DTCM_VERSIONS       GMU_WORD(0x1c400 + 0xff8)
 #define GMU_CM3_SYSRESET        GMU_WORD(0x1f800)       /* 1: the processor is held in reset */
 #define GMU_CM3_BOOT_CONFIG     GMU_WORD(0x1f801)
 #define GMU_CM3_FW_INIT_RESULT  GMU_WORD(0x1f81c)       /* 0xbabeface once firmware has started */
@@ -960,11 +960,11 @@ step_first_words(void)
 /* ---- step 7: the GMU's channel to RPMh ----------------------------------------------------------------- */
 
 /*
- * dt: qcom,kgsl-3d0 "rscc" at 0x3de0000: the same kind of command slots through which this
- * kernel asks RPMh for the touch screen's supply, but the GMU's own; through them its firmware
- * raises the 3D core's rail. Offsets in words: a6xx_gmu.xml, domain A6XX_RSCC.
+ * dt: qcom,kgsl-3d0 "rscc" at 0x3d50000 on cliffs: the same kind of command slots through
+ * which this kernel asks RPMh for the touch screen's supply, but the GMU's own; through them
+ * its firmware raises the 3D core's rail. Offsets in words: gen7_reg.h, GEN7_RSCC_*.
  */
-static struct block rscc = { "rscc", 0x03de0000, 0x2000 };
+static struct block rscc = { "rscc", 0x03d50000, 0x10000 };
 #define RSCC_RSC_STATUS0_DRV0   (4 * 0x004)
 #define RSCC_PDC_SLAVE_ID_DRV0  (4 * 0x00b)
 #define RSCC_SEQ_BUSY_DRV0      (4 * 0x101)
@@ -1019,12 +1019,12 @@ step_rscc(void)
 /* ---- steps 8 and 9: the SMMU --------------------------------------------------------------------------- */
 
 /*
- * dt: kgsl-smmu@3da0000 (qcom,qsmmu-v500: an Arm MMU-500), 0x20000 long, with "qcom,skip-init":
+ * dt: kgsl-smmu@3da0000 (qcom,qsmmu-v500: an Arm MMU-500), 0x40000 long on cliffs, with "qcom,skip-init":
  * the vendor's driver leaves its stream table as it finds it. Its streams (dt: qcom,kgsl-iommu
  * and qcom,gmu, "iommus"): 0 the GPU, 1 its low-priority twin, 2 secure content, 5 the GMU.
  * The global registers here are the ones the hypervisor imitates; offsets: arm-smmu.h.
  */
-static struct block smmu = { "smmu", 0x03da0000, 0x20000 };
+static struct block smmu = { "smmu", 0x03da0000, 0x40000 };
 #define SMMU_SCR0               0x000
 #define SMMU_IDR0               0x020           /* [7:0] stream match registers */
 #define SMMU_IDR1               0x024           /* bit 31: 64K pages, [30:28] log2(pages)-1, [7:0] translation contexts */
@@ -1129,11 +1129,11 @@ step_gmu_memory(void)
 		return false;
 	}
 	announce("hold the GMU's processor in reset, write two words into its data memory (0x3d71000), read them back");
-	if (get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT) == 0xbabeface) {
-		printf("adreno: %u: firmware is running in the GMU: leaving its memory alone\n", step);
+	if (get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET) != 1 ||
+	    get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT) != 0) {
+		printf("adreno: %u: firmware may be running in the GMU: leaving its memory alone\n", step);
 		return false;
 	}
-	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
 	get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET);
 	for (int i = 0; i < 2; i++) {
 		was[i] = get(&gmu, "dtcm", GMU_DTCM + 4 * i);
