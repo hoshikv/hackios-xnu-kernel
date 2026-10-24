@@ -2165,53 +2165,16 @@ static struct block pdc = { "pdc", 0x0b290000, 0x10000 };       /* dt: qcom,gmu 
 static bool
 step_gmu_queues(void)
 {
-	static const uint32_t program[5] = { 0xeaaae5a0, 0xe1a1ebab, 0xa2e0a581, 0xecac82e2, 0x0020edad };
-
 	if (!cx_ready() || !gmu_runs) {
 		return false;
 	}
-	announce("enable the GPU's part of the always-on sequencer (pdc, 0xb294500 and 0xb294520: a part of the SoC not "
-	    "touched before)");
-	get(&pdc, "gpu_enable", PDC_GPU_ENABLE);
-	get(&pdc, "gpu_seq_start_addr", PDC_GPU_SEQ_START_ADDR);
-	put(&pdc, "gpu_seq_start_addr", PDC_GPU_SEQ_START_ADDR, 0);
-	put(&pdc, "gpu_enable", PDC_GPU_ENABLE, 0x80000001);
-	get(&pdc, "gpu_enable", PDC_GPU_ENABLE);
-
-	announce("give the GMU's RPMh channel its sleep and wake program (rscc, 0x3de0000), unless it has it");
-	if (get(&rscc, "seq_mem_0_drv0", RSCC_SEQ_MEM_0_DRV0) == program[0] &&
-	    get(&rscc, "hidden_tcs_cmd2_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 4) == 0x80000021) {
-		goto programmed;
-	}
-	put(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0, 1u << 24);
-	put(&rscc, "pdc_slave_id_drv0", RSCC_PDC_SLAVE_ID_DRV0, 1);
-	put(&rscc, "hidden_tcs_cmd0_data", RSCC_HIDDEN_TCS_CMD0_DATA, 0);
-	put(&rscc, "hidden_tcs_cmd0_addr", RSCC_HIDDEN_TCS_CMD0_ADDR, 0);
-	put(&rscc, "hidden_tcs_cmd1_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 2, 0);
-	put(&rscc, "hidden_tcs_cmd1_addr", RSCC_HIDDEN_TCS_CMD0_ADDR + 4 * 2, 0);
-	put(&rscc, "hidden_tcs_cmd2_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 4, 0x80000021);    /* a650 and later */
-	put(&rscc, "hidden_tcs_cmd2_addr", RSCC_HIDDEN_TCS_CMD0_ADDR + 4 * 4, 0);
-	put(&rscc, "override_start_addr", RSCC_OVERRIDE_START_ADDR, 0);
-	put(&rscc, "pdc_seq_start_addr", RSCC_PDC_SEQ_START_ADDR, 0x4520);
-	put(&rscc, "pdc_match_value_lo", RSCC_PDC_MATCH_VALUE_LO, 0x4510);
-	put(&rscc, "pdc_match_value_hi", RSCC_PDC_MATCH_VALUE_HI, 0x4514);
-	for (unsigned i = 0; i < 5; i++) {
-		put(&rscc, "seq_mem_drv0", RSCC_SEQ_MEM_0_DRV0 + 4 * i, program[i]);
-	}
-	get(&rscc, "seq_mem_0_drv0", RSCC_SEQ_MEM_0_DRV0);
-
-programmed:
-	announce("ask the GMU to start its message queues");
-	put(&gmu, "hfi_ctrl_init", GMU_HFI_CTRL_INIT, 1);
+	announce("read the GMU's message queues, which the firmware started with its HFI in step 15");
+	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
 	if (!wait_for(&gmu, GMU_HFI_CTRL_STATUS, 1, 1, 500)) {
-		get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
-		get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT);
+		printf("adreno: %u: the GMU's HFI is not ready\n", step);
 		space_faulted(&gmu_space);
-		printf("adreno: %u: the GMU does not start its message queues\n", step);
 		return false;
 	}
-	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
-	get(&gmu, "hfi_version_info", GMU_HFI_VERSION_INFO);
 	gmu_talks = true;
 	printf("adreno: %u: THE GMU'S MESSAGE QUEUES ARE UP\n", step);
 	return !space_faulted(&gmu_space);
