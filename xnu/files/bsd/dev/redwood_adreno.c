@@ -109,7 +109,7 @@ extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
 #define PERIDOT_GPU_STEPS       15u             /* steps 1 to 15 are ported to the Cliffs GPU block; later ones are not */
-static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip;
+static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
@@ -1558,14 +1558,15 @@ smmu_aperture(uint32_t context)
 {
 	uint64_t function = SCM_64 | SCM_SIP | SCM_CALL(0x0c, 0x1b), session = 0;
 
-	printf("adreno: %u: about to ask TrustZone to send the GPU's streams through SMMU context %u: smc %#llx\n", step,
-	    context, function);
-	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx for SMMU context %u", step, function, context);
+	printf("adreno: %u: about to ask TrustZone to send aperture %u's streams through SMMU context %u: smc %#llx\n", step,
+	    aperture_reg, context, function);
+	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx for aperture %u, SMMU context %u", step,
+	    function, aperture_reg, context);
 	hold(true);
 	for (int i = 0; i < 100; i++) {
 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
 		register uint64_t x1 __asm__("x1") = 4;
-		register uint64_t x2 __asm__("x2") = 0xffff0000u | (context & 0xff);
+		register uint64_t x2 __asm__("x2") = 0xffff0000u | (aperture_reg & 0xff) << 8 | (context & 0xff);
 		register uint64_t x3 __asm__("x3") = 0xffffffffu;
 		register uint64_t x4 __asm__("x4") = 0xffffffffu;
 		register uint64_t x5 __asm__("x5") = 0xffffffffu;
@@ -4171,6 +4172,7 @@ redwood_adreno_init(void)
 	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("adreno_fine", &fine, sizeof(fine));
 	PE_parse_boot_argn("adreno_gmu_skip", &gmu_skip, sizeof(gmu_skip));
+	PE_parse_boot_argn("adreno_aperture_reg", &aperture_reg, sizeof(aperture_reg));
 	if (last_step == 0) {
 		return;                                 /* (adreno=0: the GPU is left alone) */
 	}
