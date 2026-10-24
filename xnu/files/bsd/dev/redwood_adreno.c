@@ -901,6 +901,8 @@ static struct block gmu = { "gmu", 0x03d68000, 0x37000 };
 #define GMU_GENERAL_7           GMU_WORD(0x1f9cc)
 #define GMU_AO_HOST_INTERRUPT_STATUS GMU_WORD(0x23b05)
 #define GMU_RSCC_CONTROL_ACK    GMU_WORD(0x23b08)
+#define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x23b07)
+#define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x23b10)
 #define GMU_AO_GPU_CX_BUSY_STATUS GMU_WORD(0x23b0c)
 #define GMU_AHB_FENCE_STATUS    GMU_WORD(0x23b13)
 
@@ -1955,6 +1957,7 @@ step_gmu_firmware(void)
 #define GMU_GENERAL_9           GMU_WORD(0x1f9ce)
 #define GMU_GENERAL_10          GMU_WORD(0x1f9cf)
 #define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x23b11)
+#define GMU_PWR_COL_CP_RESP     GMU_WORD(0x1f9ce)  /* GENERAL_9: the log write pointer */
 #define GMU_CHIP                0x07110000u     /* a7xx gen1 gmu_chipid, as a735/a730 */
 #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
 #define GMU_STARTED             0x100
