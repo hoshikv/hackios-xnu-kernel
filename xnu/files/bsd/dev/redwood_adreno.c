@@ -1773,8 +1773,8 @@ step_gmu_space(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("find the GMU's firmware, fw/a660_gmu.bin, in the small image, and make the memory it asks for");
-	gmu_firmware = image_file("fw", "a660_gmu.bin", &gmu_firmware_size);
+	announce("find the GMU's firmware, fw/gen71100_gmu.bin, in the small image, and make the memory it asks for");
+	gmu_firmware = image_file("fw", "gen71100_gmu.bin", &gmu_firmware_size);
 	if (gmu_firmware == NULL) {
 		return false;
 	}
