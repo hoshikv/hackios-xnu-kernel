@@ -109,7 +109,7 @@ extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
 #define PERIDOT_GPU_STEPS       15u             /* steps 1 to 15 are ported to the Cliffs GPU block; later ones are not */
-static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
+static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
@@ -2011,8 +2011,10 @@ gmu_rsc_setup(void)
 	put(&rscc, "seq mem 2", RSCC_SEQ_MEM_0_A735 + 8, 0xa2e0a581);
 	put(&rscc, "seq mem 3", RSCC_SEQ_MEM_0_A735 + 12, 0xecac82e2);
 	put(&rscc, "seq mem 4", RSCC_SEQ_MEM_0_A735 + 16, 0x0020edad);
-	put(&pdc_gen7, "seq start", PDC_GPU_SEQ_START_ADDR, 0);
-	put(&pdc_gen7, "enable", PDC_GPU_ENABLE, 0x80000001);
+	if (!(gmu_skip & 2)) {
+		put(&pdc_gen7, "seq start", PDC_GPU_SEQ_START_ADDR, 0);
+		put(&pdc_gen7, "enable", PDC_GPU_ENABLE, 0x80000001);
+	}
 }
 
 static bool
@@ -2054,8 +2056,12 @@ step_gmu_start(void)
 		printf("adreno: %u: the GMU is not in the state ShengGmu requires before start\n", step);
 		return false;
 	}
-	rscc_show();
-	gmu_rsc_setup();
+	if (!(gmu_skip & 1)) {
+		rscc_show();
+		gmu_rsc_setup();
+	} else {
+		printf("adreno: %u: RSC/PDC setup skipped (adreno_gmu_skip=%#x)\n", step, gmu_skip);
+	}
 	put(&gmu, "cx_falnext_intf", GMU_CX_FALNEXT_INTF, 1);
 	put(&gmu, "cx_fal_intf", GMU_CX_FAL_INTF, 1);
 	put(&cx_misc, "tcm_ret_cntl", CX_MISC_TCM_RET_CNTL, 1);
@@ -2097,6 +2103,10 @@ step_gmu_start(void)
 			    config_values[i], was);
 			return false;
 		}
+	}
+	if (gmu_skip & 4) {
+		printf("adreno: %u: not releasing CM3 (adreno_gmu_skip=%#x)\n", step, gmu_skip);
+		return true;
 	}
 	gmu_runs = true;
 	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 0);
@@ -4160,6 +4170,7 @@ redwood_adreno_init(void)
 	}
 	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("adreno_fine", &fine, sizeof(fine));
+	PE_parse_boot_argn("adreno_gmu_skip", &gmu_skip, sizeof(gmu_skip));
 	if (last_step == 0) {
 		return;                                 /* (adreno=0: the GPU is left alone) */
 	}
