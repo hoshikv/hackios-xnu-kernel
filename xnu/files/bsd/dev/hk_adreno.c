@@ -1132,12 +1132,18 @@ step_gmu_memory(void)
 		return false;
 	}
 	announce("hold the GMU's processor in reset, write two words into its data memory (0x3d71000), read them back");
-	if (get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET) != 1 ||
-	    get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT) != 0) {
-		printf("adreno: %u: firmware may be running in the GMU: leaving its memory alone\n", step);
+	if (get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET) != 1) {
+		printf("adreno: %u: the GMU's processor is not held in reset: leaving its memory alone\n", step);
 		return false;
 	}
-	get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET);
+	if (get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT) != 0) {
+		/* a failed start left its verdict; the processor is in reset, so clear it */
+		put(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT, 0);
+		if (get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT) != 0) {
+			printf("adreno: %u: the GMU's old result will not clear\n", step);
+			return false;
+		}
+	}
 	for (int i = 0; i < 2; i++) {
 		was[i] = get(&gmu, "dtcm", GMU_DTCM + 4 * i);
 	}
