@@ -108,7 +108,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
-#define PERIDOT_GPU_STEPS       15u             /* steps 1 to 15 are ported to the Cliffs GPU block; later ones are not */
+#define PERIDOT_GPU_STEPS       17u             /* steps 1 to 17 are ported to the Cliffs GPU block; later ones are not */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
 static uint32_t gmu_chip = 0x07010100u;
 static uint32_t step;                   /* the one being performed */
