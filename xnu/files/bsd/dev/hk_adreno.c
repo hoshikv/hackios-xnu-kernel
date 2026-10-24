@@ -110,7 +110,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
 #define PERIDOT_GPU_STEPS       15u             /* steps 1 to 15 are ported to the Cliffs GPU block; later ones are not */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
-static uint32_t gmu_chip = 0x07110000u;
+static uint32_t gmu_chip = 0x07010100u;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
@@ -1961,7 +1961,7 @@ step_gmu_firmware(void)
 #define GMU_GENERAL_10          GMU_WORD(0x1f9cf)
 #define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x23b11)
 #define GMU_PWR_COL_CP_RESP     GMU_WORD(0x1f9ce)  /* GENERAL_9: the log write pointer */
-#define GMU_CHIP                0x07110000u     /* a7xx gen1 gmu_chipid, as a735/a730 */
+#define GMU_CHIP                0x07010100u     /* A735 gen7_11_0 gmu_chipid (A730 0x07110000 does not boot) */
 #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
 #define GMU_STARTED             0x100
 #define GMU_FAILED              0xe00
