@@ -1219,6 +1219,7 @@ struct gpu_space {
 	const char *name;
 	uint32_t context;               /* which of the SMMU's */
 	uint32_t control;               /* bits of its control register besides the usual */
+	bool no_stream_table;           /* the hypervisor routes its stream to this context (the SMMU aperture call) */
 	uint32_t table_count;
 	uint64_t *root;
 	struct {
@@ -1446,12 +1447,15 @@ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
 		return false;
 	}
 	put(&smmu, "cb sctlr", context + SMMU_CB_SCTLR, SMMU_SCTLR_ON | space->control);
-	put(&smmu, "s2cr", SMMU_S2CR(match), space->context);
-	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream);
+	if (!space->no_stream_table) {
+		put(&smmu, "s2cr", SMMU_S2CR(match), space->context);
+		put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream);
+	}
 
 	/* the global ones are the hypervisor's to grant: see what it made of them */
-	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream) ||
-	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context ||
+	if ((!space->no_stream_table &&
+	    (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream) ||
+	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context)) ||
 	    (get(&smmu, "cbar", smmu_page + SMMU_CBAR(space->context)) & 0x30000) != (SMMU_CBAR_STAGE_1 & 0x30000) ||
 	    !(get(&smmu, "cb sctlr", context + SMMU_CB_SCTLR) & 1) ||
 	    get(&smmu, "cb ttbr0, low", context + SMMU_CB_TTBR0) != (uint32_t)root ||
@@ -1472,8 +1476,10 @@ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
 static void
 space_off(struct gpu_space *space, uint32_t match)
 {
-	put(&smmu, "smr", SMMU_SMR(match), 0);
-	put(&smmu, "s2cr", SMMU_S2CR(match), SMMU_S2CR_FAULT);
+	if (!space->no_stream_table) {
+		put(&smmu, "smr", SMMU_SMR(match), 0);
+		put(&smmu, "s2cr", SMMU_S2CR(match), SMMU_S2CR_FAULT);
+	}
 	put(&smmu, "cb sctlr", smmu_context(space) + SMMU_CB_SCTLR, 0);
 }
 
@@ -1536,6 +1542,43 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		}
 	}
 	printf("adreno: %u: TrustZone keeps saying the call was interrupted\n", step);
+	return -1;
+}
+
+/*
+ * The GPU SMMU's stream table is the hypervisor's on peridot: writes to SMR/S2CR
+ * abort. qcom_scm_kgsl_set_smmu_aperture asks it to send the GPU's streams
+ * through a context bank instead. SVC_MP, CP_SMMU_APERTURE_ID; four values:
+ * the aperture register in bits 8..15 and the context bank in bits 0..7.
+ */
+static int32_t
+smmu_aperture(uint32_t context)
+{
+	uint64_t function = SCM_64 | SCM_SIP | SCM_CALL(0x0c, 0x1b), session = 0;
+
+	printf("adreno: %u: about to ask TrustZone to send the GPU's streams through SMMU context %u: smc %#llx\n", step,
+	    context, function);
+	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx for SMMU context %u", step, function, context);
+	hold(true);
+	for (int i = 0; i < 100; i++) {
+		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
+		register uint64_t x1 __asm__("x1") = 4;
+		register uint64_t x2 __asm__("x2") = 0xffff0000u | (context & 0xff);
+		register uint64_t x3 __asm__("x3") = 0xffffffffu;
+		register uint64_t x4 __asm__("x4") = 0xffffffffu;
+		register uint64_t x5 __asm__("x5") = 0xffffffffu;
+		register uint64_t x6 __asm__("x6") = session;
+		register uint64_t x7 __asm__("x7") = 0;
+
+		__asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3), "+r" (x4), "+r" (x5), "+r" (x6),
+		    "+r" (x7) : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+		session = x6;
+		if (x0 != SCM_INTERRUPTED) {
+			printf("adreno: %u: TrustZone returns %d for the SMMU aperture\n", step, (int32_t)x0);
+			return (int32_t)x0;
+		}
+	}
+	printf("adreno: %u: TrustZone keeps saying the aperture call was interrupted\n", step);
 	return -1;
 }
 
@@ -1804,10 +1847,15 @@ step_gmu_space(void)
 	}
 
 	announce("give the SMMU's context 1 these tables and send the GMU's requests (stream 5) through it: the first "
-	    "writes to the SMMU, the global ones (cbar, cba2r, s2cr, smr) through the hypervisor");
+	    "writes to the SMMU, the stream table itself through the hypervisor's aperture call");
 	if (!smmu_layout()) {
 		return false;
 	}
+	if (smmu_aperture(gmu_space.context) != 0) {
+		printf("adreno: %u: the hypervisor does not give the GMU its SMMU context\n", step);
+		return false;
+	}
+	gmu_space.no_stream_table = true;
 	gmu_space_is_on = true;         /* whatever of it has been written by the time something fails is taken back */
 	return space_on(&gmu_space, GMU_MATCH, GMU_STREAM);
 }
