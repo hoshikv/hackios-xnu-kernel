@@ -387,7 +387,7 @@ index 4df41ba1f61b..613494793615 100644
  	inittodr(0);
  
 +	/* touch polls are logged before the root mount can wait forever */
-+	redwood_goodix_init();
++	hk_goodix_init();
 +
  	/* Mount the root file system. */
  	while (TRUE) {
