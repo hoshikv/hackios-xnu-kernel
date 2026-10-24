@@ -108,7 +108,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
-#define PERIDOT_GPU_STEPS       10u             /* steps 1 to 10 are ported to the Cliffs GPU block; later ones are not */
+#define PERIDOT_GPU_STEPS       12u             /* steps 1 to 12 are ported to the Cliffs GPU block; later ones are not */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -1006,7 +1006,7 @@ step_rscc(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read the GMU's RPMh channel (0x3de0000)");
+	announce("read the GMU's RPMh channel (0x3d50000)");
 	get(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0);
 	get(&rscc, "pdc_slave_id_drv0", RSCC_PDC_SLAVE_ID_DRV0);
 	get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0);
@@ -1619,49 +1619,87 @@ image_file(const char *directory, const char *name, uint64_t *size)
 }
 
 /*
- * The first of the three calls with which Linux has a zap shader loaded (mdt_loader.c:
- * qcom_mdt_pas_init, qcom_scm.c: qcom_scm_pas_init_image): TrustZone is given the image's header --
- * the ELF header and the block of hashes and certificates, which is all of the file a660_zap.mdt
- * -- and checks the signature. Nothing of the GPU is involved, so it can be asked now. The other
- * two (where the image will be, and "authenticate and start") need the 3D core powered.
- *
- * The header goes in memory of ours, page-aligned and in one piece. Qualcomm's note at that
- * call says that for these calls the hypervisor itself arranges TrustZone's access to the memory
- * ("creates SHM bridges on behalf of Linux"), and that TrustZone protects the memory while it
- * works: so it is not touched again here, and never freed.
+ * The gen7 zap shader is a Qualcomm .mbn: an ELF32 whose first program header is the
+ * metadata block (the ELF header and the table of program headers) and whose hash
+ * segment carries the signature. TrustZone's PAS init takes both in one page of ours,
+ * as the .mdt header did on redwood. The first program header therefore is not a
+ * segment to load, and the hash segment is the one whose flags say "hash".
  */
-/* The zap shader's header in a page of ours, as TrustZone wants it; where that page is in physical memory. */
+#define ZAP_FILE                "gen71100_zap.mbn"
+#define ZAP_HASH_FLAGS          2               /* bits 24..26 of p_flags */
+
+static uint32_t
+le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint16_t
+le16(const uint8_t *p)
+{
+	return (uint16_t)(p[0] | p[1] << 8);
+}
+
+/* The zap shader's metadata in a page of ours, as TrustZone wants it; where that page is in physical memory. */
 static bool
 zap_header(uint64_t *phys)
 {
-	const uint8_t *header;
+	const uint8_t *fw;
 	vm_offset_t page = 0;
-	uint64_t size = 0;
-	uint32_t segments, hashes;
+	uint64_t size = 0, header_bytes, hash_offset, hash_bytes;
+	uint32_t phoff, phent, phnum, hash = 0, i;
 
-	header = image_file("fw", "a660_zap.mdt", &size);
-	if (header == NULL) {
+	fw = image_file("fw", ZAP_FILE, &size);
+	if (fw == NULL) {
 		return false;
 	}
-	/* a 32-bit ELF: the count of segments at 44, the table of them at 52, 32 bytes each, the file size of one at +16 */
-	segments = size >= 52 + 2 * 32 ? header[44] | header[45] << 8 : 0;
-	if (memcmp(header, "\177ELF\1", 5) != 0 || segments < 2 || size > PAGE_SIZE) {
-		printf("adreno: %u: that is not such a header (%02x %02x %02x %02x, %u segments)\n", step, header[0], header[1],
-		    header[2], header[3], segments);
+	if (size < 52 || memcmp(fw, "\177ELF\1", 5) != 0) {
+		printf("adreno: %u: %s is not a 32-bit ELF (%02x %02x %02x %02x, %llu bytes)\n", step, ZAP_FILE, fw[0], fw[1],
+		    fw[2], fw[3], size);
 		return false;
 	}
-	memcpy(&hashes, header + 52 + 32 + 16, sizeof(hashes));
-	printf("adreno: %u: an ELF header of %u segments, %u bytes with its table, then %llu bytes; by the table, %u of hashes\n",
-	    step, segments, 52 + 32 * segments, size - (52 + 32 * segments), hashes);
-	if (52 + 32 * segments + (uint64_t)hashes != size) {
-		printf("adreno: %u: the file is not the header followed by the hashes alone: not what TrustZone takes\n", step);
+#define ZAP_PH(field)   le32(fw + phoff + i * 32 + (field) * 4)
+	phoff = le32(fw + 28);
+	phent = le16(fw + 42);
+	phnum = le16(fw + 44);
+	if (phent != 32 || phnum < 2 || phnum > 16 || phoff + (uint64_t)phnum * 32 > size) {
+		printf("adreno: %u: %s has %u program headers of %u bytes at %#x: not what TrustZone takes\n", step, ZAP_FILE,
+		    phnum, phent, phoff);
 		return false;
 	}
+	i = 0;
+	if (ZAP_PH(0) == 1) {
+		printf("adreno: %u: %s starts with a loadable segment, not the metadata block\n", step, ZAP_FILE);
+		return false;
+	}
+	for (i = 1; i < phnum && !hash; i++) {
+		if (((ZAP_PH(6) >> 24) & 7) == ZAP_HASH_FLAGS) {
+			hash = i;
+		}
+	}
+	if (!hash) {
+		printf("adreno: %u: %s has no hash segment\n", step, ZAP_FILE);
+		return false;
+	}
+	i = 0;
+	header_bytes = ZAP_PH(4);
+	i = hash;
+	hash_offset = ZAP_PH(1);
+	hash_bytes = ZAP_PH(4);
+#undef ZAP_PH
+	if (header_bytes > size || hash_offset + hash_bytes > size || header_bytes + hash_bytes > PAGE_SIZE) {
+		printf("adreno: %u: %s: %llu bytes of header and %llu of hashes do not fit one page\n", step, ZAP_FILE,
+		    header_bytes, hash_bytes);
+		return false;
+	}
+	printf("adreno: %u: %s: %llu bytes of header, %llu of hashes at %#llx\n", step, ZAP_FILE, header_bytes, hash_bytes,
+	    hash_offset);
 	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		printf("adreno: %u: no memory\n", step);
 		return false;
 	}
-	memcpy((void *)page, header, size);
+	memcpy((void *)page, fw, header_bytes);
+	memcpy((void *)(page + header_bytes), fw + hash_offset, hash_bytes);
 	to_memory(page, PAGE_SIZE);             /* TrustZone reads memory, not this processor's cache */
 	*phys = kvtophys(page);
 	return true;
@@ -1673,11 +1711,12 @@ step_zap_signature(void)
 	uint64_t header = 0, answer = ~0ull;
 	int32_t result;
 
-	announce("find the zap shader's header, fw/a660_zap.mdt, in the small image that came with the kernel");
+	announce("find the zap shader's metadata in the small image that came with the kernel, fw/" ZAP_FILE);
 	if (!zap_header(&header)) {
 		return false;
 	}
-	announce("hand the header to TrustZone to check its signature (image 13); a call that may be preempted, as Linux's is");
+	announce("hand the metadata to TrustZone to check the zap shader's signature (image 13); a call that may be "
+	    "preempted, as Linux's is");
 	result = scm("to take the zap shader's signature", SCM_64 | SCM_SIP | SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_GPU,
 	    header, 0, &answer);
 	if (result == 0 && answer == 0) {
