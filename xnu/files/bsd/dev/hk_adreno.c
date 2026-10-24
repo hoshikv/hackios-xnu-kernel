@@ -1177,7 +1177,7 @@ step_gmu_memory(void)
 
 #define SMMU_S2CR_FAULT         (2u << 16)
 #define SMMU_SMR_VALID          (1u << 31)
-#define SMMU_STREAM_MASK        0x400           /* dt: the second cell of every "iommus" of this SMMU */
+#define SMMU_STREAM_MASK        0               /* peridot dt: gmu iommus = <SMMU 5 0>: no mask */
 #define SMMU_CBAR_STAGE_1       (1u << 16 | 3u << 8 | 0xfu << 12)       /* our tables alone decide; weakest defaults */
 #define SMMU_CBA2R(n)           (0x800 + 4 * (n))                       /* in the second page, like CBAR */
 #define SMMU_CBA2R_64_BIT       1
@@ -1799,7 +1799,7 @@ struct gmu_firmware_block {
 #define GMU_FIRMWARE_NEEDS      1               /* types of blocks without data: memory wanted, value = bytes */
 #define GMU_FIRMWARE_NEEDS_KEPT 7
 
-static struct gpu_space gmu_space = { .name = "the GMU", .context = 0 };
+static struct gpu_space gmu_space = { .name = "the GMU", .context = 1 };
 static struct gpu_block gmu_blocks[12], gmu_log, gmu_hfi;
 static unsigned gmu_block_count;
 static const uint8_t *gmu_firmware;
@@ -1854,11 +1854,6 @@ step_gmu_space(void)
 	if (!smmu_layout()) {
 		return false;
 	}
-	if (smmu_aperture(gmu_space.context) != 0) {
-		printf("adreno: %u: the hypervisor does not give the GMU its SMMU context\n", step);
-		return false;
-	}
-	gmu_space.no_stream_table = true;
 	gmu_space_is_on = true;         /* whatever of it has been written by the time something fails is taken back */
 	return space_on(&gmu_space, GMU_MATCH, GMU_STREAM);
 }
