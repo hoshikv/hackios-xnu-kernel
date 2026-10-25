@@ -2404,10 +2404,11 @@ step_core_power(void)
 {
 	static const struct {
 		uint32_t khz, level;
-	} speeds[] = { { 0, 0 }, { 315000, 64 }, { 450000, 128 }, { 550000, 192 } };
-	static struct hfi_perf_table perf;
+	} speeds[] = { { 0, 0 }, { 305000, 64 }, { 400000, 128 }, { 550000, 192 } };
 	static struct hfi_bw_table bw;
 	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, HFI_NO_INDEX }, granted = 0, speed = 0;
+	uint32_t gpu_vote[4], gmu_vote[2], table[200], *at = table;
+	unsigned gpu_levels = sizeof(speeds) / sizeof(speeds[0]), gmu_levels = 2;
 	uint16_t gfx[16], cx[16], mx[16];
 	unsigned gfx_levels, cx_levels, mx_levels;
 
@@ -2419,50 +2420,39 @@ step_core_power(void)
 		printf("adreno: %u: RPMh's list lacks one of the rails\n", step);
 		return false;
 	}
-	perf.gpu_levels = sizeof(speeds) / sizeof(speeds[0]);
-	for (unsigned i = 0; i < perf.gpu_levels; i++) {
-		perf.gpu[i].khz = speeds[i].khz;
-		perf.gpu[i].acd = 0xffffffff;           /* no adaptive clocking */
-		if (!rail_vote(speeds[i].level, gfx, gfx_levels, mx, mx_levels, &perf.gpu[i].vote)) {
+	for (unsigned i = 0; i < gpu_levels; i++) {
+		if (!rail_vote(speeds[i].level, gfx, gfx_levels, mx, mx_levels, &gpu_vote[i])) {
 			printf("adreno: %u: RPMh has no level %u for the 3D core's rail\n", step, speeds[i].level);
 			return false;
 		}
 	}
-	perf.gmu_levels = 2;
-	perf.gmu[1].khz = 200000;
-	if (!rail_vote(0, cx, cx_levels, mx, mx_levels, &perf.gmu[0].vote) ||
-	    !rail_vote(48, cx, cx_levels, mx, mx_levels, &perf.gmu[1].vote)) {  /* "minimum SVS", the vendor's choice */
+	if (!rail_vote(0, cx, cx_levels, mx, mx_levels, &gmu_vote[0]) ||
+	    !rail_vote(48, cx, cx_levels, mx, mx_levels, &gmu_vote[1])) {  /* "minimum SVS", the vendor's choice */
 		return false;
 	}
-	printf("adreno: %u: votes: 3D core %#x %#x %#x %#x, GMU %#x %#x\n", step, perf.gpu[0].vote, perf.gpu[1].vote,
-	    perf.gpu[2].vote, perf.gpu[3].vote, perf.gmu[0].vote, perf.gmu[1].vote);
+	printf("adreno: %u: votes: 3D core %#x %#x %#x %#x, GMU %#x %#x\n", step, gpu_vote[0], gpu_vote[1],
+	    gpu_vote[2], gpu_vote[3], gmu_vote[0], gmu_vote[1]);
 
-	bw.levels = 1;
-	bw.ddr_commands = 3;
-	bw.ddr_wait = 7;
-	bw.ddr_address[0] = rpmh_resource("SH0", NULL, NULL);
-	bw.ddr_address[1] = rpmh_resource("MC0", NULL, NULL);
-	bw.ddr_address[2] = rpmh_resource("ACV", NULL, NULL);
-	bw.ddr_data[0][0] = bw.ddr_data[0][1] = bw.ddr_data[0][2] = 0x40000000;
-	bw.cnoc_commands = 1;
-	bw.cnoc_wait = 1;
-	bw.cnoc_address[0] = rpmh_resource("CN0", NULL, NULL);
-	bw.cnoc_data[0][0] = 0x40000000;
-	bw.cnoc_data[1][0] = 0x60000001;
-	printf("adreno: %u: RPMh's bus resources: SH0 %#x, MC0 %#x, ACV %#x, CN0 %#x (Linux has 0x50004, 0x50000, 0x50088, "
-	    "0x5006c)\n", step, bw.ddr_address[0], bw.ddr_address[1], bw.ddr_address[2], bw.cnoc_address[0]);
-	if (bw.ddr_address[0] == 0 || bw.ddr_address[1] == 0 || bw.ddr_address[2] == 0 || bw.cnoc_address[0] == 0) {
-		return false;
+	/* HFI 2.6.1: H2F_MSG_TABLE with a GPU-perf entry, then a GMU-perf entry. */
+	*at++ = 0;                      /* header, filled by hfi_send() */
+	*at++ = 0;                      /* version */
+	*at++ = 1;                      /* HFI_TABLE_GPU_PERF */
+	*at++ = gpu_levels;
+	*at++ = 3;                      /* struct opp_gx_desc: vote, dep_vote, freq */
+	for (unsigned i = 0; i < gpu_levels; i++) {
+		*at++ = gpu_vote[i];
+		*at++ = 0;              /* dep_vote: no ACD/dependency level */
+		*at++ = speeds[i].khz;
 	}
-
-	if (PE_parse_boot_argn("adreno_speed", &speed, sizeof(speed)) && speed >= 1 && speed < perf.gpu_levels) {
-		vote[2] = speed;
+	*at++ = gmu_levels;
+	*at++ = 2;                      /* struct opp_desc: vote, freq */
+	for (unsigned i = 0; i < gmu_levels; i++) {
+		*at++ = gmu_vote[i];
+		*at++ = i == 0 ? 0 : 200000;
 	}
-	core_khz = speeds[vote[2]].khz;
-	printf("adreno: %u: the speed wanted: %u MHz\n", step, core_khz / 1000);
 	announce("send the GMU its tables (speeds and supply levels, bus votes), \"start\", and the speed wanted; "
 	    "from here on it casts votes in RPMh by itself");
-	if (!hfi_send("the table of speeds", HFI_PERF_TABLE, &perf.header, sizeof(perf) / 4) ||
+	if (!hfi_send("the table of speeds", 15, table, (uint32_t)(at - table)) ||
 	    !hfi_send("the table of bus votes", HFI_BW_TABLE, &bw.header, sizeof(bw) / 4) ||
 	    !hfi_send("\"start the core firmware\"", HFI_CORE_FW_START, core_start, 2) ||
 	    !hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4)) {
