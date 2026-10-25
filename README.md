@@ -99,6 +99,34 @@ adb pull /vendor/firmware_mnt/image/adsp.{mdt,b02,...,b36} fw-audio/            
 adb pull /vendor/firmware/aw8697_haptic.bin fw-haptic/                                       # haptics
 ```
 
+For the **POCO F6 / Redmi Turbo 3 (peridot)** profile, the GPU uses its A735 firmware names instead:
+
+```sh
+adb pull /vendor/firmware/gen71100_{gmu.bin,sqe.fw,zap.mbn} fw-gpu/                       # Adreno A735
+```
+
+Peridot audio also needs the DSP device-tree image and every segment named by its header; without these,
+the DSP can authenticate `adsp.mdt` but never announce itself to the application processor:
+
+```sh
+adb pull /vendor/firmware_mnt/image/adsp_dtb.mdt fw-audio/
+# Pull each /vendor/firmware_mnt/image/adsp_dtb.bNN segment referenced by adsp_dtb.mdt into fw-audio/.
+```
+
+The Peridot input device is `/dev/hk-touch`. The kernel also exposes `/dev/redwood-touch` as an alias because
+older prebuilt userland injectors open that path; both names access the same physical-button and touch stream.
+
+The `peridot-metal` kernel branch pairs with the userland `metal` branch. `common/setup.sh` selects it by default;
+use `USERLAND_REF=metal common/setup.sh` explicitly if you already have another userland checkout. Building
+`peridot` uses `GL=1` and boots with `gpu=1 metal=1`: Mesa/Freedreno provides the accelerated OpenGL ES path,
+and `metal=1` permits the Metal experiment's registry switch. This does not enable the full Metal compositor:
+the working system UI path is OpenGL ES. Metal plugin discovery remains opt-in at runtime (`metal_props on`);
+setting it globally can destabilize processes before the experimental driver is ready.
+
+```sh
+common/build.sh peridot
+```
+
 (Put the `fw-*` directories next to the workspace. Wi-Fi also needs `fw-wifi/mac` — the radio's address on one
 line — and `fw-wifi/network` — network name and password. `userland/build.sh` prints which firmware went in.)
 

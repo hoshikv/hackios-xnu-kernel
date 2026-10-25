@@ -17,12 +17,12 @@
 # usage: common/setup.sh            clone hackios-xnu-userland into this tree (or update it) and
 #                                   check the host for the tools the build needs
 #   USERLAND_URL=...   where to clone from (default: github.com/oosexgang/hackios-xnu-userland)
-#   USERLAND_REF=...   branch or tag (default: main)
+#   USERLAND_REF=...   branch or tag (default: metal; set main for non-Metal work)
 set -e
 cd "$(dirname "$(readlink -f "$0")")/.."
 ROOT=$PWD
 URL=${USERLAND_URL:-https://github.com/oosexgang/hackios-xnu-userland.git}
-REF=${USERLAND_REF:-main}
+REF=${USERLAND_REF:-metal}
 UG=(git --git-dir="$ROOT/.userland.git" --work-tree="$ROOT")
 
 if [ ! -d .userland.git ]; then
@@ -47,7 +47,13 @@ if [ ! -d .userland.git ]; then
 else
 	echo "setup: hackios-xnu-userland already here, updating"
 	cp common/userland.exclude .userland.git/info/exclude
-	"${UG[@]}" pull --ff-only || echo "setup: could not fast-forward the userland checkout (local changes?)"
+	# This kernel branch needs the matching Metal userland. Switch only when Git can do so
+	# without overwriting local edits; a failed switch leaves the current checkout untouched.
+	if "${UG[@]}" checkout "$REF"; then
+		"${UG[@]}" pull --ff-only || echo "setup: could not fast-forward the userland checkout (local changes?)"
+	else
+		echo "setup: could not switch userland to $REF (local changes or missing ref?)"
+	fi
 fi
 "${UG[@]}" log -1 --format='setup: hackios-xnu-userland at %h (%cs) %s'
 git log -1 --format='setup: hackios-xnu-kernel   at %h (%cs) %s'

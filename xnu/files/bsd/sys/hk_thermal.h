@@ -55,40 +55,51 @@
 
 struct thermal_zone {
 	const char *name;                       /* as the device tree calls it */
-	uint8_t block, sensor;                  /* TSENS block 0 or 1, sensor number in it */
+	uint8_t block, sensor;                  /* TSENS block 0..2, sensor number in it */
 	int8_t domain;                          /* 0..2, THERMAL_ALL_CPUS or THERMAL_NO_CPU */
 	int16_t passive;                        /* start slowing at this, tenths of C */
 	int16_t critical;                       /* the emergency stop */
 };
 
 static const struct thermal_zone hk_thermal_zones[] = {
+	/* Peridot TSENS0: CPU complex and always-on sensors. */
 	{ "aoss-0", 0, 0, THERMAL_NO_CPU, 1000, 1150 },
-	{ "cpu-0-0", 0, 1, 0, 950, 1150 },
-	{ "cpu-0-1", 0, 2, 0, 950, 1150 },
-	{ "cpu-0-2", 0, 3, 0, 950, 1150 },
-	{ "cpu-0-3", 0, 4, 0, 950, 1150 },
-	{ "cpuss-0", 0, 5, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpuss-1", 0, 6, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-0", 0, 7, 1, 950, 1150 },
-	{ "cpu-1-1", 0, 8, 1, 950, 1150 },
-	{ "cpu-1-2", 0, 9, 1, 950, 1150 },
-	{ "cpu-1-3", 0, 10, 1, 950, 1150 },
-	{ "cpu-1-4", 0, 11, 1, 950, 1150 },
-	{ "cpu-1-5", 0, 12, 1, 950, 1150 },
-	{ "cpu-1-6", 0, 13, 2, 950, 1150 },
-	{ "cpu-1-7", 0, 14, 2, 950, 1150 },
+	{ "cpuss-0", 0, 1, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpuss-1", 0, 2, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-0-0", 0, 3, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-0-1", 0, 4, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-1-0", 0, 5, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-1-1", 0, 6, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-2-0", 0, 7, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-2-1", 0, 8, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-3-0", 0, 9, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-3-1", 0, 10, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-2-0-0", 0, 11, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-2-0-1", 0, 12, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-2-0-2", 0, 13, THERMAL_ALL_CPUS, 950, 1150 },
+	/* Peridot TSENS1: CPU, neural, GPU, video, memory and camera zones. */
 	{ "aoss-1", 1, 0, THERMAL_NO_CPU, 1000, 1150 },
-	{ "gpuss-0", 1, 1, THERMAL_NO_CPU, 950, 1150 },
-	{ "gpuss-1", 1, 2, THERMAL_NO_CPU, 950, 1150 },
-	{ "nspss-0", 1, 3, THERMAL_NO_CPU, 1000, 1150 },
-	{ "nspss-1", 1, 4, THERMAL_NO_CPU, 1000, 1150 },
-	{ "video", 1, 5, THERMAL_NO_CPU, 1000, 1150 },
-	{ "ddr", 1, 6, THERMAL_NO_CPU, 1000, 1150 },
-	{ "mdmss-0", 1, 7, THERMAL_NO_CPU, 950, 1150 },
-	{ "mdmss-1", 1, 8, THERMAL_NO_CPU, 950, 1150 },
-	{ "mdmss-2", 1, 9, THERMAL_NO_CPU, 950, 1150 },
-	{ "mdmss-3", 1, 10, THERMAL_NO_CPU, 950, 1150 },
-	{ "camera-0", 1, 11, THERMAL_NO_CPU, 1000, 1150 },
+	{ "cpu-0-0-0", 1, 1, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-0-1-0", 1, 2, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-0-2-0", 1, 3, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "nsphvx-0", 1, 4, THERMAL_NO_CPU, 1000, 1150 },
+	{ "nsphvx-1", 1, 5, THERMAL_NO_CPU, 1000, 1150 },
+	{ "nsphmx-0", 1, 6, THERMAL_NO_CPU, 1000, 1150 },
+	{ "nsphmx-1", 1, 7, THERMAL_NO_CPU, 1000, 1150 },
+	{ "gpuss-0", 1, 8, THERMAL_NO_CPU, 950, 1150 },
+	{ "gpuss-1", 1, 9, THERMAL_NO_CPU, 950, 1150 },
+	{ "gpuss-2", 1, 10, THERMAL_NO_CPU, 950, 1150 },
+	{ "gpuss-3", 1, 11, THERMAL_NO_CPU, 950, 1150 },
+	{ "video", 1, 12, THERMAL_NO_CPU, 1000, 1150 },
+	{ "ddr", 1, 13, THERMAL_NO_CPU, 1000, 1150 },
+	{ "camera-0", 1, 14, THERMAL_NO_CPU, 1000, 1150 },
+	{ "camera-1", 1, 15, THERMAL_NO_CPU, 1000, 1150 },
+	/* Peridot TSENS2: modem subsystem. */
+	{ "aoss-2", 2, 0, THERMAL_NO_CPU, 1000, 1150 },
+	{ "mdmss-0", 2, 1, THERMAL_NO_CPU, 950, 1150 },
+	{ "mdmss-1", 2, 2, THERMAL_NO_CPU, 950, 1150 },
+	{ "mdmss-2", 2, 3, THERMAL_NO_CPU, 950, 1150 },
+	{ "mdmss-3", 2, 4, THERMAL_NO_CPU, 950, 1150 },
 };
 #define THERMAL_ZONES   ((int)(sizeof(hk_thermal_zones) / sizeof(hk_thermal_zones[0])))
 

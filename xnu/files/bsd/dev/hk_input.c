@@ -213,6 +213,11 @@ hk_input_init(void)
 
 	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hk-touch") == NULL) {
 		printf("hk-touch: cannot create the device\n");
+		return;
+	}
+	/* Existing small APFS images can carry an older inject library that opens this name. */
+	if (devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "redwood-touch") == NULL) {
+		printf("hk-touch: cannot create the legacy redwood-touch alias\n");
 	}
 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
 	hk_board_report();

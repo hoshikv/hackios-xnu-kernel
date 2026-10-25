@@ -1,6 +1,8 @@
 /*
- * The Wi-Fi of the POCO X5 Pro (redwood), from nothing and step by step. Every address below
- * belongs to this phone, and nothing here is touched unless a boot-arg asks for it.
+ * The Wi-Fi bring-up is based on the POCO X5 Pro (redwood) WCN6750 path. Peridot's DT also
+ * advertises qcom,wcn6750; board-specific SMEM, WPSS, mailbox, doorbell, pin, SMMU-I/O virtual
+ * address, and MSI locations come from its profile. Remaining radio setup still needs staged
+ * bring-up before wifi=1 is enabled. Nothing here is touched unless a boot-arg asks for it.
  *
  * The radio is a WCN6750. Its firmware does not run on the application processor but on a
  * processor of its own inside the SoC, the "WPSS" (a Hexagon DSP), which stays in reset until
@@ -165,6 +167,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/hk_input.h>
+#include <sys/hk_board.h>
 #include <sys/hk_qrtr.h>
 #include <sys/hk_sta.h>
 #include <sys/stat.h>
@@ -451,7 +454,7 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
  * how long. Who is who: we are processor 0; the Wi-Fi DSP is 13 (dt: qcom,remote-pid of
  * qcom,smp2p-wpss). Nothing here writes to this memory.
  */
-#define SMEM_PHYS               0x80900000UL
+#define SMEM_PHYS               hk_board_addr("smem", 0x80900000UL)
 #define SMEM_SIZE               0x00200000u
 #define SMEM_US                 0
 #define SMEM_WPSS               13
@@ -874,7 +877,7 @@ step_mailbox(void)
 /* ---- step 3: RPMh -------------------------------------------------------------------------------------- */
 
 /* dt: reserved-memory cmd_db@80860000: the boot loader's list of what RPMh can switch (cmd-db.c; as in hk_adreno.c) */
-#define CMD_DB_PHYS             0x80860000UL
+#define CMD_DB_PHYS             hk_board_addr("cmd_db", 0x80860000UL)
 #define CMD_DB_SIZE             0x20000UL
 
 struct cmd_db_slave {
@@ -1230,10 +1233,9 @@ step_rails(void)
  * an external abort, which ends the kernel. They are TrustZone's; the device tree gives the
  * loader's node the crystal alone.)
  */
-#define FIRST_PIN               84
-static struct block tlmm = { "tlmm", 0x0f100000 + 0x1000 * FIRST_PIN, 0x3000 };        /* the three pins' registers */
-#define GPIO_CFG(n)             (0x1000 * ((n) - FIRST_PIN))            /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
-#define GPIO_IO(n)              (0x1000 * ((n) - FIRST_PIN) + 4)        /* bit 0 in, bit 1 out */
+static struct block tlmm = { "tlmm", 0x0f100000, 0x00100000 };
+#define GPIO_CFG(n)             (0x1000 * (n))                          /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
+#define GPIO_IO(n)              (0x1000 * (n) + 4)                      /* bit 0 in, bit 1 out */
 
 static bool
 step_pins(void)
@@ -1241,7 +1243,11 @@ step_pins(void)
 	static const struct {
 		unsigned pin;
 		const char *what;
-	} pins[] = { { 84, "the radio's enable or reset" }, { 85, "Bluetooth's reset" }, { 86, "Bluetooth's sw-ctrl" } };
+	} pins[] = {
+		{ hk_board_number("wlan_reset", 84), "the radio's enable or reset" },
+		{ hk_board_number("bt_reset", 85), "Bluetooth's reset" },
+		{ hk_board_number("bt_sw", 86), "Bluetooth's sw-ctrl" }
+	};
 
 	announce("read how the firmware left the radio's pins (registers the touch screen's driver uses too)");
 	need(&tlmm);
@@ -1258,8 +1264,8 @@ step_pins(void)
 /* ---- step 6: the firmware ------------------------------------------------------------------------------ */
 
 #define PAS_WPSS                6               /* dt: qcom,pas-id of qcom,wpss@8a00000 */
-#define WPSS_MEMORY             0x9ae00000u     /* dt: reserved-memory wlan@9ae00000, that node's memory-region */
-#define WPSS_MEMORY_SIZE        0x01900000u
+#define WPSS_MEMORY             hk_board_addr("wpss_mem", 0x9ae00000u) /* Peridot DT: wpss_region@9bb00000 */
+#define WPSS_MEMORY_SIZE        hk_board_number("wpss_size", 0x01900000u)
 
 extern dev_t mdevlookup(int devid);
 extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
@@ -3593,7 +3599,7 @@ smmu_look(void)
  * the boot chain left: dt "qcom,skip-init").
  *
  * The radio's addresses are where Android's tree puts them (dt: qcom,iommu-dma-addr-pool of
- * qcom,wcn6750: 256 MB from 0xa0000000), handed out upwards and never taken back; its faults
+ * qcom,wcn6750, supplied as board_wifi_iova), handed out upwards and never taken back; its faults
  * are recorded and do not stop it (dt: qcom,iommu-faults "stall-disable", "HUPCF"), and nobody
  * takes their interrupt: radio_space_faults() looks.
  *
@@ -3605,7 +3611,7 @@ smmu_look(void)
  * everything read back as written (but two bits that the SMMU does not keep), and the radio
  * then read and wrote the memory it was shown without a fault.
  */
-#define RADIO_ADDRESSES         0xa0000000ull
+#define RADIO_ADDRESSES         hk_board_addr("wifi_iova", 0xa0000000ull)
 #define RADIO_ADDRESSES_SIZE    0x10000000u
 #define RADIO_TABLES            32              /* of 4K: the root, one of the second level, and 2 MB of addresses each other */
 #define RADIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11) /* a page; for requests of either
@@ -3619,7 +3625,7 @@ smmu_look(void)
  * tree's node for it, a register of the GIC that raises the SPI whose number is written; the
  * node's interrupts are SPI 768..799, so vector v is the GIC's number 800 + v.
  */
-#define RADIO_MSI_REGISTER      0x17a10040ull
+#define RADIO_MSI_REGISTER      hk_board_addr("wifi_msi", 0x17a10040ull)
 #define RADIO_FIRST_SPI         768u
 #define PTE_ADDRESS             0x0000fffffffff000ull
 #define SMMU_SGFSR              0x048           /* what the SMMU as a whole has refused ... */
@@ -4274,6 +4280,14 @@ hk_wifi_init(void)
 		printf("wifi: wifi=%u is not understood: wifi=1 turns the radio on, wifi_step=N goes the first N steps of that\n", on);
 		return;
 	}
+	/* The per-device profile supplies the address and GPIO map taken from its own DT. */
+	aoss.phys = hk_board_addr("aoss", aoss.phys);
+	ipcc.phys = hk_board_addr("ipcc", ipcc.phys);
+	rsc.phys = hk_board_addr("rsc", rsc.phys);
+	tlmm.phys = hk_board_addr("tlmm", tlmm.phys);
+	arb_core.phys = hk_board_addr("spmi_core", arb_core.phys);
+	arb_cnfg.phys = hk_board_addr("spmi_cnfg", arb_cnfg.phys);
+	arb_observer.phys = hk_board_addr("spmi_obsrvr", arb_observer.phys);
 	if (pe_arm_get_soc_base_phys() != HK_SOC_BASE) {
 		if (last_step != 0 && PE_parse_boot_argn("wifi_lx", &back, sizeof(back)) && back) {
 			/* a check of what is under the driver: it gets as far as finding no firmware to talk to */

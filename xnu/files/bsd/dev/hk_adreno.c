@@ -100,6 +100,7 @@
 #include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
 #include <sys/hk_input.h>
+#include <sys/hk_board.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
@@ -3948,6 +3949,11 @@ hk_adreno_minute(void)
 	if (!gpu_kept) {
 		return;
 	}
+	/* The periodic GPU temperature report shares TSENS with hk_thermal. Use this
+	 * phone's address too; the Redwood default is unmapped on Peridot and faults
+	 * on the first memory report after the GPU has been kept on.
+	 */
+	tsens.phys = hk_board_addr("tsens1", tsens.phys);
 	need(&tsens);
 	for (unsigned i = 0; i < 2; i++) {
 		tenths[i] = -2730;

@@ -48,8 +48,9 @@ hk_board_number(const char *name, uint32_t dflt)
 void
 hk_board_report(void)
 {
-	static const char *const names[] = { "epss", "cmd_db", "rsc", "tsens0", "tsens1", "gcc", "dispcc", "intf", "ufshc",
-		                             "spmi_core", "spmi_cnfg", "spmi_obsrvr" };
+	static const char *const names[] = { "epss", "cmd_db", "rsc", "tsens0", "tsens1", "tsens2", "smem", "aoss", "ipcc",
+		                             "tlmm", "wpss_mem", "wifi_iova", "wifi_msi", "gcc", "dispcc", "intf", "ufshc", "spmi_core",
+		                             "spmi_cnfg", "spmi_obsrvr" };
 	int given = 0;
 
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {

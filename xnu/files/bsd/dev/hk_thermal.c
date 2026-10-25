@@ -1,6 +1,7 @@
 /*
- * The thermal service of the POCO X5 Pro (redwood): every quarter of a second the SoC's 27 temperature
- * sensors are read, the governor of sys/hk_thermal.h decides how fast each group of processor
+ * The thermal service reads every mapped SoC temperature channel every quarter second; each board's
+ * device profile supplies its TSENS register blocks and sys/hk_thermal.h names the Peridot channels.
+ * The governor decides how fast each group of processor
  * cores may run and how hot iOS should be told the phone is, and that is carried out.
  *
  * Why there has to be one: with cpufreq=1 this kernel puts every group of cores it uses at the top of
@@ -53,12 +54,13 @@ extern void loader_log_putc(char c);
 
 #define TSENS0_TM               hk_board_addr("tsens0", 0x0c263000UL)    /* dt: tsens@c222000, "tsens_tm_physical" */
 #define TSENS1_TM               hk_board_addr("tsens1", 0x0c265000UL)    /* dt: tsens@c223000 */
+#define TSENS2_TM               hk_board_addr("tsens2", 0x0c267000UL)    /* Peridot dt: tsens@c22a000 */
 #define TSENS_TM_SIZE           0x1000UL
 #define TSENS_STATUS(sensor)    (0xa0 + 4 * (sensor))
 #define TSENS_VALID             (1u << 21)
 #define TSENS_TRIES             4               /* a sensor caught between two conversions is asked again */
 
-static vm_offset_t tsens[2];
+static vm_offset_t tsens[3];
 static struct thermal_gov gov;
 static int16_t readings[THERMAL_ZONES];
 static bool thermal_caps_on;                    /* cpufreq raised a group: there are caps to set */
@@ -66,7 +68,7 @@ static bool thermal_caps_on;                    /* cpufreq raised a group: there
 /* what the sysctls show, kept by the service's thread and read by anyone */
 static LCK_GRP_DECLARE(thermal_lck_grp, "hk-thermal");
 static LCK_MTX_DECLARE(thermal_mtx, &thermal_lck_grp);
-static char thermal_text[3072];
+static char thermal_text[6144];
 static int thermal_pressure, thermal_hottest = THERMAL_INVALID, thermal_throttles, thermal_running;
 
 SYSCTL_DECL(_kern_hackios);
@@ -242,13 +244,14 @@ hk_thermal_init(void)
 	thermal_caps_on = raised;
 	tsens[0] = ml_io_map(TSENS0_TM, TSENS_TM_SIZE);
 	tsens[1] = ml_io_map(TSENS1_TM, TSENS_TM_SIZE);
+	tsens[2] = ml_io_map(TSENS2_TM, TSENS_TM_SIZE);
 	thermal_gov_init(&gov, top);
 	for (int z = 0; z < THERMAL_ZONES; z++) {
 		readings[z] = read_sensor(hk_thermal_zones[z].block, hk_thermal_zones[z].sensor);
 	}
 	/* one reading of the prime core's sensor to the log: whether TSENS answers at all is the first thing to know */
-	tell("thermal: %d sensors; the prime core reads %s C; caps %s; every %d ms\n", THERMAL_ZONES,
-	    tenths_text(readings[13], a, sizeof(a)), thermal_caps_on ? "on" : "off (thermal=2: watching only)", THERMAL_TICK_MS);
+	tell("thermal: %d sensors; CPU sensor %s C; caps %s; every %d ms\n", THERMAL_ZONES,
+	    tenths_text(readings[3], a, sizeof(a)), thermal_caps_on ? "on" : "off (thermal=2: watching only)", THERMAL_TICK_MS);
 	if (kernel_thread_start(thermal_thread, NULL, &thread) != KERN_SUCCESS) {
 		tell("thermal: no thread: the cores are NOT watched\n");
 		return;
