@@ -2440,9 +2440,10 @@ step_core_power(void)
 	*at++ = 1;                      /* HFI_TABLE_GPU_PERF */
 	*at++ = gpu_levels;
 	*at++ = 3;                      /* struct opp_gx_desc: vote, dep_vote, freq */
+	static const uint32_t dep_vote[4] = { 0, 2, 3, 4 };     /* CX rail index for each GX level */
 	for (unsigned i = 0; i < gpu_levels; i++) {
 		*at++ = gpu_vote[i];
-		*at++ = 0;              /* dep_vote: no ACD/dependency level */
+		*at++ = dep_vote[i];
 		*at++ = speeds[i].khz;
 	}
 	*at++ = gmu_levels;
