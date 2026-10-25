@@ -2404,11 +2404,13 @@ step_core_power(void)
 {
 	static const struct {
 		uint32_t khz, level;
-	} speeds[] = { { 0, 0 }, { 305000, 64 }, { 400000, 128 }, { 550000, 192 } };
+	} speeds[] = { { 0, 0 }, { 255000, 56 }, { 353000, 64 }, { 500000, 128 }, { 633000, 192 },
+	    { 684000, 224 }, { 736000, 256 }, { 835000, 320 }, { 900000, 384 }, { 950000, 400 },
+	    { 1000000, 416 }, { 1100000, 432 } };
 	static struct hfi_bw_table bw;
 	uint32_t acd[4] = { 0, 12, 0, 0 };    /* H2F_MSG_FEATURE_CTRL, HFI_FEATURE_ACD, off */
 	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 0, 0 }, granted = 0, speed = 0;
-	uint32_t gpu_vote[4], gmu_vote[2], table[200], *at = table;
+	uint32_t gpu_vote[12], gmu_vote[2], table[200], *at = table;
 	unsigned gpu_levels = sizeof(speeds) / sizeof(speeds[0]), gmu_levels = 2;
 	uint16_t gfx[16], cx[16], mx[16];
 	unsigned gfx_levels, cx_levels, mx_levels;
