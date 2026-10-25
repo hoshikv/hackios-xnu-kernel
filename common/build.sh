@@ -46,7 +46,25 @@ fi
 if ! skip images; then
 	have_userland
 	[ -d ios165/rootfs ] || die "no iOS files yet: run ios165/fetch.sh first (it downloads them from Apple to this machine)"
+	# The Peridot branch carries a small userland build fix until it is upstream: include
+	# adsp_dtb.mdt and its segments with the ADSP firmware, which the DSP requires at PAS 0x24.
+	P=common/patches/userland-adsp-dtb.patch
+	USERLAND_PATCH_APPLIED=0
+	if ! git apply --reverse --check "$P" >/dev/null 2>&1; then
+		git apply --check "$P" || die "cannot apply the Peridot ADSP-DTB userland patch"
+		git apply "$P"
+		USERLAND_PATCH_APPLIED=1
+	fi
+	# Do not leave the separately versioned userland checkout dirty after its build, including
+	# when that build exits early.
+	if [ "$USERLAND_PATCH_APPLIED" = 1 ]; then
+		trap 'git apply --reverse "$P"' EXIT
+	fi
 	env REST=1 $USERLAND_VARS "$@" userland/build.sh
+	if [ "$USERLAND_PATCH_APPLIED" = 1 ]; then
+		git apply --reverse "$P"
+		trap - EXIT
+	fi
 fi
 
 if ! skip boot && [ "$KIND" = phone ]; then

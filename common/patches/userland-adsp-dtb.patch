@@ -1,0 +1,57 @@
+diff --git a/userland/build.sh b/userland/build.sh
+index 0a28e91..717581e 100755
+--- a/userland/build.sh
++++ b/userland/build.sh
+@@ -83,6 +83,22 @@ LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
+ DYN="xnu-clang -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
+ IOS=../ios165
+ CACHE=$IOS/20F66__iPhone10,3_6
++
++# Keep the ADSP's signed device tree with its firmware. On WCN/ADSP platforms the
++# DSP can authenticate adsp.mdt yet remain silent until PAS 0x24 receives this image.
++copy_adsp_firmware() {
++	local destination=$1 segment
++	[ -f ../fw-audio/adsp.mdt ] || return 0
++	mkdir -p "$destination"
++	cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] "$destination/"
++	if [ -f ../fw-audio/adsp_dtb.mdt ]; then
++		cp ../fw-audio/adsp_dtb.mdt "$destination/"
++		for segment in ../fw-audio/adsp_dtb.b*; do
++			[ -f "$segment" ] || continue
++			cp "$segment" "$destination/"
++		done
++	fi
++}
+ # ios165/rootfs and ios165/cryptex must be this copy's own directories of hard links, the way
+ # tools/new-workspace.sh makes them. A symlink to another copy's tree makes sysroot a symlink too, because
+ # cp -a does not follow one, and then every rm -rf and mv below edits the shared extraction in place. That
+@@ -594,8 +610,7 @@ done
+ # adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
+ # the loader takes.
+ if [ -n "$ADSP" ] && [ -f ../fw-audio/adsp.mdt ]; then
+-	mkdir -p root/fw
+-	install -m 0644 ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] root/fw/
++	copy_adsp_firmware root/fw
+ fi
+ # Firmware that is not there is otherwise silent at build time and speaks only much later, deep in a
+ # device log -- "adreno: THE GPU IS NOT STARTED: the small image has no fw/a660_gmu.bin" cost a phone
+@@ -671,8 +686,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+ 	# reads the firmware as soon as there is a root (this image, adsp=1), the configuration maybe later -- by then
+ 	# from the iOS volume's /fw, which src/init.c (flash_root) binds to this
+ 	if [ -f ../fw-audio/adsp.mdt ]; then
+-		mkdir -p flashboot/fw
+-		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] flashboot/fw/
++		copy_adsp_firmware flashboot/fw
+ 	fi
+ 	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
+ 		mkdir -p flashboot/fw
+@@ -741,8 +755,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
+ 	# the audio DSP's firmware, the phone's own from ../fw-audio (never in the repository), where the kernel reads
+ 	# it once the root is mounted (bsd/dev/hk_adsp.c, adsp=1): 20 MB that do not fit beside GL=1 in the small image
+ 	if [ -f ../fw-audio/adsp.mdt ]; then
+-		mkdir -p sysroot/fw
+-		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
++		copy_adsp_firmware sysroot/fw
+ 	fi
+ 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (bsd/dev/hk_speaker.c,
+ 	# for sound=3): Android's own register values, which are not in the repository either
