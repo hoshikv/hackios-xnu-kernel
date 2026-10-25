@@ -110,7 +110,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
 #define PERIDOT_GPU_STEPS       22u             /* all 22 steps are ported to the Cliffs GPU block */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
-static uint32_t gmu_chip = 0x07010100u;
+static uint32_t gmu_chip = 0x07010100u, vote_freq = 3, vote_bw = 0xffff0001u;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
@@ -2407,7 +2407,7 @@ step_core_power(void)
 	} speeds[] = { { 0, 0 }, { 305000, 64 }, { 400000, 128 }, { 550000, 192 } };
 	static struct hfi_bw_table bw;
 	uint32_t acd[4] = { 0, 12, 0, 0 };    /* H2F_MSG_FEATURE_CTRL, HFI_FEATURE_ACD, off */
-	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, 0xffff0001u }, granted = 0, speed = 0;
+	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 0, 0 }, granted = 0, speed = 0;
 	uint32_t gpu_vote[4], gmu_vote[2], table[200], *at = table;
 	unsigned gpu_levels = sizeof(speeds) / sizeof(speeds[0]), gmu_levels = 2;
 	uint16_t gfx[16], cx[16], mx[16];
@@ -2434,6 +2434,8 @@ step_core_power(void)
 	printf("adreno: %u: votes: 3D core %#x %#x %#x %#x, GMU %#x %#x\n", step, gpu_vote[0], gpu_vote[1],
 	    gpu_vote[2], gpu_vote[3], gmu_vote[0], gmu_vote[1]);
 
+	vote[2] = vote_freq;
+	vote[3] = vote_bw;
 	/* HFI 2.6.1: H2F_MSG_TABLE with a GPU-perf entry, then a GMU-perf entry. */
 	*at++ = 0;                      /* header, filled by hfi_send() */
 	*at++ = 0;                      /* version */
@@ -4172,6 +4174,8 @@ hk_adreno_init(void)
 	PE_parse_boot_argn("adreno_gmu_skip", &gmu_skip, sizeof(gmu_skip));
 	PE_parse_boot_argn("adreno_aperture_reg", &aperture_reg, sizeof(aperture_reg));
 	PE_parse_boot_argn("adreno_chip", &gmu_chip, sizeof(gmu_chip));
+	PE_parse_boot_argn("adreno_vote_freq", &vote_freq, sizeof(vote_freq));
+	PE_parse_boot_argn("adreno_vote_bw", &vote_bw, sizeof(vote_bw));
 	if (last_step == 0) {
 		return;                                 /* (adreno=0: the GPU is left alone) */
 	}
