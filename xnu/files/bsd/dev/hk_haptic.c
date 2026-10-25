@@ -127,7 +127,8 @@ wait_ms(uint32_t ms)
 /* ---- pins ------------------------------------------------------------------------------------------ */
 
 #define TLMM_PHYS               0x0f100000UL
-#define TLMM_SIZE               0x100000UL
+/* GPIO54 is the highest pin this driver touches (register at 0x36000, plus GPIO_IO). */
+#define TLMM_SIZE               0x40000UL
 #define GPIO_CFG(n)             (tlmm + 0x1000UL * (n))         /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
 #define GPIO_IO(n)              (tlmm + 0x1000UL * (n) + 4)     /* bit 0 in, bit 1 out */
 #define CFG_PULL_UP             3
