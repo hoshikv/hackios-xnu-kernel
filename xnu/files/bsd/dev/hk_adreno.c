@@ -110,7 +110,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
 #define PERIDOT_GPU_STEPS       22u             /* all 22 steps are ported to the Cliffs GPU block */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
-static uint32_t gmu_chip = 0x07010100u, vote_freq = 11, vote_bw = 0xffff00ffu;
+static uint32_t gmu_chip = 0x07020100u, vote_freq = 11, vote_bw = 0xffff00ffu;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
@@ -1961,7 +1961,7 @@ step_gmu_firmware(void)
 #define GMU_GENERAL_10          GMU_WORD(0x1f9cf)
 #define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x23b11)
 #define GMU_PWR_COL_CP_RESP     GMU_WORD(0x1f9ce)  /* GENERAL_9: the log write pointer */
-#define GMU_CHIP                0x07010100u     /* A735 gen7_11_0 gmu_chipid (A730 0x07110000 does not boot) */
+#define GMU_CHIP                0x07020100u     /* A735 gen7_11_0 gmu_chipid (ACD/clock interface) */
 #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
 #define GMU_STARTED             0x100
 #define GMU_FAILED              0xe00
@@ -2810,7 +2810,7 @@ step_zap_load(void)
 		return true;
 	}
 	if (scm("where the image will be", SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_GPU, ZAP_MEMORY,
-	    hi - lo, &answer) != 0 || answer != 0) {
+	    (uint32_t)round_page(hi - lo), &answer) != 0 || answer != 0) {
 		printf("adreno: %u: TrustZone does not take the place (%#llx): TAKEN TO MEAN THAT IT KEEPS A ZAP SHADER FROM "
 		    "BEFORE, which is used as it is\n", step, answer);
 		zap_is_loaded = true;
@@ -2853,7 +2853,7 @@ step_zap_load(void)
 static bool
 step_core_start(void)
 {
-	static const uint32_t address_modes[] = { 0x0842, 0x0c01, 0x8601, 0x8e05, 0x9e01, 0xbe05, 0xa601, 0x9601, 0x0e00, 0xae01,
+	static const uint32_t address_modes[] = { 0x0842, 0x0c01, 0x8601, 0x8e05, 0x9e01, 0xa601, 0x9601, 0x0e00, 0xae01,
 		                                  0xb601, 0xf810 };
 	uint32_t blind = 0;
 
