@@ -1223,6 +1223,16 @@ to_memory(vm_offset_t start, vm_size_t size)
 	settle();
 }
 
+/* Invalidate data the GPU wrote without cleaning a stale CPU copy over it. */
+static void
+from_memory(vm_offset_t start, vm_size_t size)
+{
+	for (vm_offset_t line = start & ~(vm_offset_t)63; line < start + size; line += 64) {
+		__asm__ volatile ("dc ivac, %0" : : "r" (line) : "memory");
+	}
+	settle();
+}
+
 #define SPACE_TABLES            1024            /* 2 GB of addresses, were they all in use */
 
 struct gpu_space {
@@ -2982,7 +2992,7 @@ step_core_commands(void)
 	if (!ring_run("write a word to memory")) {
 		return false;
 	}
-	to_memory(core_scratch.memory, 64);
+	from_memory(core_scratch.memory, 64);
 	printf("adreno: %u: the page reads %#x: %s\n", step, scratch[0], scratch[0] == 0x600dc0de ?
 	    "THE 3D CORE WRITES OUR MEMORY ON COMMAND" : "not what it was told to write");
 	return scratch[0] == 0x600dc0de;
@@ -3082,10 +3092,10 @@ step_frame(void)
 	if (!ring_run("fill a picture")) {
 		return false;
 	}
-	to_memory(core_scratch.memory, 64);
+	from_memory(core_scratch.memory, 64);
 	printf("adreno: %u: the words it writes when its caches are in memory: %#x, %#x (told: 0xc0c0c0c, 0xd0e0d0e)\n", step,
 	    ((volatile uint32_t *)core_scratch.memory)[8], ((volatile uint32_t *)core_scratch.memory)[4]);
-	to_memory(core_target.memory, core_target.size);
+	from_memory(core_target.memory, core_target.size);
 	pixel = (const volatile uint8_t *)core_target.memory;
 	printf("adreno: %u: the picture's first pixel is %02x %02x %02x %02x (blue green red alpha; told: 00 80 ff ff), one in "
 	    "the middle %02x %02x %02x %02x, one in the last row %02x %02x %02x %02x\n", step, pixel[0], pixel[1], pixel[2],
@@ -3645,7 +3655,7 @@ hk_gpu_done(uint32_t fence)
 {
 	volatile uint32_t *word = (volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
 
-	to_memory((vm_offset_t)word, 4);
+	from_memory((vm_offset_t)word, 4);
 	return (int32_t)(*word - fence) >= 0;
 }
 
@@ -3672,7 +3682,7 @@ gpu_times(void)
 	volatile uint64_t *times = (volatile uint64_t *)(core_scratch.memory + GPU_TIMES_AT);
 	uint32_t done;
 
-	to_memory(core_scratch.memory, 4096);
+	from_memory(core_scratch.memory, 4096);
 	done = *(volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
 	if (done - gpu_timed > GPU_TIMES) {
 		gpu_timed = done - GPU_TIMES;           /* (the older ones have been written over) */
@@ -3771,6 +3781,7 @@ hk_gpu_report(const char *why)
 {
 	uint32_t context = smmu_context(&core_space);
 
+	from_memory(core_scratch.memory + GPU_FENCE_AT, sizeof(uint32_t));
 	printf("adreno: gpu: %s: submission %u is the last, the core has done %u; ring: read up to %u, written up to %u; status "
 	    "%#x, interrupts %#x; command processor: fault %#x, interrupts %#x, protection %#x\n", why, gpu_fence,
 	    *(volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT), rd(gpu.base + CP_RB_RPTR), ring_at,
