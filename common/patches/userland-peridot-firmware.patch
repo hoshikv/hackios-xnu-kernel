@@ -92,3 +92,18 @@ index ca4339e..9a0c489 100644
 -	return @"Adreno (Redwood; the GPU is not started)";
 +	return @"Adreno (GPU is not started)";
  }
+
+diff --git a/userland/src/inject.c b/userland/src/inject.c
+index c4b58a4..2d886bc 100644
+--- a/userland/src/inject.c
++++ b/userland/src/inject.c
+@@ -1007,6 +1007,8 @@ send_button(IOHIDServiceClientRef buttons, const struct hk_touch *t)
+ 	}
+ 	event = IOHIDEventCreateKeyboardEvent(NULL, t->time, HID_PAGE_CONSUMER, usage, t->type == HK_BUTTON_DOWN, 0);
+ 	IOHIDEventSetIntegerValue(event, FIELD_IS_BUILT_IN, 1);
+-	IOHIDVirtualServiceClientDispatchEvent(buttons, event);
++	Boolean sent = IOHIDVirtualServiceClientDispatchEvent(buttons, event);
++	say("redwood: input: button %u %s (consumer usage %#x) %s\n", t->finger,
++	    t->type == HK_BUTTON_DOWN ? "pressed" : "released", usage, sent ? "dispatched" : "not dispatched");
+ 	CFRelease(event);
+ }
