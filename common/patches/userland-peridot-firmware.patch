@@ -1,8 +1,10 @@
 diff --git a/userland/build.sh b/userland/build.sh
-index 0a28e91..b2197b5 100755
+index 0a28e91..6b5fbd0 100755
 --- a/userland/build.sh
 +++ b/userland/build.sh
-@@ -85,2 +85,37 @@ IOS=../ios165
+@@ -83,6 +83,41 @@ LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
+ DYN="xnu-clang -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
+ IOS=../ios165
  CACHE=$IOS/20F66__iPhone10,3_6
 +
 +# Keep the ADSP signed device tree beside its firmware; Peridot's DSP does not answer until PAS 0x24 has it.
@@ -40,7 +42,20 @@ index 0a28e91..b2197b5 100755
 +	done
 +}
  # ios165/rootfs and ios165/cryptex must be this copy's own directories of hard links, the way
-@@ -557,7 +592,3 @@ fi
+ # tools/new-workspace.sh makes them. A symlink to another copy's tree makes sysroot a symlink too, because
+ # cp -a does not follow one, and then every rm -rf and mv below edits the shared extraction in place. That
+@@ -103,7 +138,7 @@ IOS_JOBS=${JOBS-"
+ 	com.apple.backboardd com.apple.mobile.usermanagerd com.apple.mobilegestalt.xpc com.apple.lsd
+ 	com.apple.powerd com.apple.analyticsd com.apple.logd_helper
+ 	com.apple.iconservices.iconservicesagent com.apple.pluginkit.pkd
+-	com.apple.SpringBoard
++	com.apple.SpringBoard com.apple.PosterBoard
+ "}
+ # iOS's own Wi-Fi daemon, for Settings to have a Wi-Fi to show: the kernel answers it in
+ # bsd/dev/hk_apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
+@@ -555,11 +590,7 @@ fi
+ # (bsd/dev/hk_wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
+ # board data and the regulatory database (image/qca6750 there; 60 and 24 KB)
  if [ -f ../fw-wifi/wpss.mdt ]; then
 -	mkdir -p root/fw
 -	install -m 0644 ../fw-wifi/wpss.mdt ../fw-wifi/wpss.b0[2-9] root/fw/
@@ -49,29 +64,45 @@ index 0a28e91..b2197b5 100755
 -	done
 +	copy_wifi_firmware root/fw
  	# the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
-@@ -596,4 +627,3 @@ done
+ 	# so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
+ 	rm -f root/fw/network
+@@ -594,8 +625,7 @@ done
+ # adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
+ # the loader takes.
  if [ -n "$ADSP" ] && [ -f ../fw-audio/adsp.mdt ]; then
 -	mkdir -p root/fw
 -	install -m 0644 ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] root/fw/
 +	copy_adsp_firmware root/fw
  fi
-@@ -673,4 +703,3 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+ # Firmware that is not there is otherwise silent at build time and speaks only much later, deep in a
+ # device log -- "adreno: THE GPU IS NOT STARTED: the small image has no fw/a660_gmu.bin" cost a phone
+@@ -671,8 +701,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+ 	# reads the firmware as soon as there is a root (this image, adsp=1), the configuration maybe later -- by then
+ 	# from the iOS volume's /fw, which src/init.c (flash_root) binds to this
  	if [ -f ../fw-audio/adsp.mdt ]; then
 -		mkdir -p flashboot/fw
 -		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] flashboot/fw/
 +		copy_adsp_firmware flashboot/fw
  	fi
-@@ -743,4 +772,3 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
+ 	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
+ 		mkdir -p flashboot/fw
+@@ -741,8 +770,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
+ 	# the audio DSP's firmware, the phone's own from ../fw-audio (never in the repository), where the kernel reads
+ 	# it once the root is mounted (bsd/dev/hk_adsp.c, adsp=1): 20 MB that do not fit beside GL=1 in the small image
  	if [ -f ../fw-audio/adsp.mdt ]; then
 -		mkdir -p sysroot/fw
 -		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
 +		copy_adsp_firmware sysroot/fw
  	fi
+ 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (bsd/dev/hk_speaker.c,
+ 	# for sound=3): Android's own register values, which are not in the repository either
 diff --git a/userland/src/hkmetal.m b/userland/src/hkmetal.m
 index ca4339e..9a0c489 100644
 --- a/userland/src/hkmetal.m
 +++ b/userland/src/hkmetal.m
-@@ -2400,6 +2400,4 @@ struct gem_close { uint32_t handle, pad; };
+@@ -2398,19 +2398,21 @@ struct gem_close { uint32_t handle, pad; };
+ - (void)setMetalAssertionsEnabled:(BOOL)enabled { _assertions = enabled; }
+ 
  /* Without this the device inherits _MTLDevice's own answer, which is "Apple GPU" -- true of
 - * the code and false of the hardware. The name is Mesa's renderer string for this chip
 - * (docs/air.md: `Adreno 7c+ Gen 3, chip 0x06030500`), and the identifier beside it is asked
@@ -80,24 +111,27 @@ index ca4339e..9a0c489 100644
 + * the code and false of the hardware. Keep the reported name in step with the board ID that
 + * the kernel gives Mesa: Peridot's DT identifies its Adreno 735 as 0x43030b00. */
  - (NSString *)name
-@@ -2409,2 +2407,6 @@ struct gem_close { uint32_t handle, pad; };
+ {
+ 	uint64_t chip = 0;
+ 
  	if (gpu_param(_gpu, 0x03, &chip)) {
 +		if ((chip & 0xffffffffu) == 0x43030b00u) {
 +			return [NSString stringWithFormat:@"Adreno 735 (chip %#x, Peridot)",
 +					 (unsigned)(chip & 0xffffffffu)];
 +		}
  		return [NSString stringWithFormat:@"Adreno 7c+ Gen 3 (chip %#x, Redwood)",
-@@ -2412,3 +2414,3 @@ struct gem_close { uint32_t handle, pad; };
+ 				 (unsigned)(chip & 0xffffffffu)];
  	}
 -	return @"Adreno (Redwood; the GPU is not started)";
 +	return @"Adreno (GPU is not started)";
  }
-
+ 
+ /*
 diff --git a/userland/src/inject.c b/userland/src/inject.c
-index c4b58a4..2d886bc 100644
+index c4b58a4..1a62383 100644
 --- a/userland/src/inject.c
 +++ b/userland/src/inject.c
-@@ -1007,6 +1007,8 @@ send_button(IOHIDServiceClientRef buttons, const struct hk_touch *t)
+@@ -1007,7 +1007,9 @@ send_button(IOHIDServiceClientRef buttons, const struct hk_touch *t)
  	}
  	event = IOHIDEventCreateKeyboardEvent(NULL, t->time, HID_PAGE_CONSUMER, usage, t->type == HK_BUTTON_DOWN, 0);
  	IOHIDEventSetIntegerValue(event, FIELD_IS_BUILT_IN, 1);
@@ -107,3 +141,4 @@ index c4b58a4..2d886bc 100644
 +	    t->type == HK_BUTTON_DOWN ? "pressed" : "released", usage, sent ? "dispatched" : "not dispatched");
  	CFRelease(event);
  }
+ 
