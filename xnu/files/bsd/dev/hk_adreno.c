@@ -110,7 +110,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
 #define PERIDOT_GPU_STEPS       22u             /* all 22 steps are ported to the Cliffs GPU block */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
-static uint32_t gmu_chip = 0x07010100u, vote_freq = 3, vote_bw = 0xffff0001u;
+static uint32_t gmu_chip = 0x07010100u, vote_freq = 11, vote_bw = 0xffff00ffu;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
