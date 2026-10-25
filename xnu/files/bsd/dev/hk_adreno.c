@@ -2407,7 +2407,7 @@ step_core_power(void)
 	} speeds[] = { { 0, 0 }, { 305000, 64 }, { 400000, 128 }, { 550000, 192 } };
 	static struct hfi_bw_table bw;
 	uint32_t acd[4] = { 0, 12, 0, 0 };    /* H2F_MSG_FEATURE_CTRL, HFI_FEATURE_ACD, off */
-	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, HFI_NO_INDEX }, granted = 0, speed = 0;
+	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, 0xffff0001u }, granted = 0, speed = 0;
 	uint32_t gpu_vote[4], gmu_vote[2], table[200], *at = table;
 	unsigned gpu_levels = sizeof(speeds) / sizeof(speeds[0]), gmu_levels = 2;
 	uint16_t gfx[16], cx[16], mx[16];
