@@ -49,7 +49,7 @@ index 0a28e91..6b5fbd0 100755
  	com.apple.powerd com.apple.analyticsd com.apple.logd_helper
  	com.apple.iconservices.iconservicesagent com.apple.pluginkit.pkd
 -	com.apple.SpringBoard
-+	com.apple.SpringBoard com.apple.PosterBoard
++	com.apple.SpringBoard com.apple.PosterBoard com.apple.mediaremoted
  "}
  # iOS's own Wi-Fi daemon, for Settings to have a Wi-Fi to show: the kernel answers it in
  # bsd/dev/hk_apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
