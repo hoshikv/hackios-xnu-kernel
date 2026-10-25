@@ -3772,6 +3772,12 @@ hk_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
 	ring(CORE_SCRATCH_ADDRESS + GPU_FENCE_AT);
 	ring(0);
 	ring(gpu_fence);
+	/* The event's timestamp write does not retire on this A735; wait for the pipeline and write our fence directly. */
+	ring_command(CP_WAIT_FOR_IDLE, 0);
+	ring_command(CP_MEM_WRITE, 3);
+	ring(CORE_SCRATCH_ADDRESS + GPU_FENCE_AT);
+	ring(0);
+	ring(gpu_fence);
 	ring_send();
 	return gpu_fence;
 }
