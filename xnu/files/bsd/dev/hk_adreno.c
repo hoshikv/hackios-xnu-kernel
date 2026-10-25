@@ -2406,8 +2406,7 @@ step_core_power(void)
 		uint32_t khz, level;
 	} speeds[] = { { 0, 0 }, { 305000, 64 }, { 400000, 128 }, { 550000, 192 } };
 	static struct hfi_bw_table bw;
-	uint32_t acd[4] = { 0, 12, 1, 0 };    /* H2F_MSG_FEATURE_CTRL, HFI_FEATURE_ACD, on */
-	uint32_t acd_tbl[8] = { 0, 1, 0xe, 1, 3, 0x882f5ffd, 0x882c5ffd, 0xa8295ffd };
+	uint32_t acd[4] = { 0, 12, 0, 0 };    /* H2F_MSG_FEATURE_CTRL, HFI_FEATURE_ACD, off */
 	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, 0xffff0001u }, granted = 0, speed = 0;
 	uint32_t gpu_vote[4], gmu_vote[2], table[200], *at = table;
 	unsigned gpu_levels = sizeof(speeds) / sizeof(speeds[0]), gmu_levels = 2;
@@ -2441,10 +2440,9 @@ step_core_power(void)
 	*at++ = 1;                      /* HFI_TABLE_GPU_PERF */
 	*at++ = gpu_levels;
 	*at++ = 3;                      /* struct opp_gx_desc: vote, dep_vote, freq */
-	static const uint32_t dep_vote[4] = { 0, 2, 3, 4 };     /* CX rail index for each GX level */
 	for (unsigned i = 0; i < gpu_levels; i++) {
 		*at++ = gpu_vote[i];
-		*at++ = dep_vote[i];
+		*at++ = 0xffffffffu;    /* no CX/ACD dependency vote */
 		*at++ = speeds[i].khz;
 	}
 	*at++ = gmu_levels;
@@ -2457,8 +2455,7 @@ step_core_power(void)
 	    "from here on it casts votes in RPMh by itself");
 	if (!hfi_send("the table of speeds", 15, table, (uint32_t)(at - table)) ||
 	    !hfi_send("the table of bus votes", HFI_BW_TABLE, &bw.header, sizeof(bw) / 4) ||
-	    !hfi_send("enable ACD", 11, acd, 4) ||
-	    !hfi_send("the ACD table", 7, acd_tbl, 8) ||
+	    !hfi_send("turn ACD off", 11, acd, 4) ||
 	    !hfi_send("\"start the core firmware\"", HFI_CORE_FW_START, core_start, 2) ||
 	    !hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4)) {
 		return false;
