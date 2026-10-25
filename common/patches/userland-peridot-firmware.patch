@@ -141,4 +141,24 @@ index c4b58a4..1a62383 100644
 +	    t->type == HK_BUTTON_DOWN ? "pressed" : "released", usage, sent ? "dispatched" : "not dispatched");
  	CFRelease(event);
  }
- 
+
+diff --git a/userland/mkjobs.py b/userland/mkjobs.py
+index 3d2fe2a..0000000 100755
+--- a/userland/mkjobs.py
++++ b/userland/mkjobs.py
+@@ -265,6 +265,14 @@
+ angels = f'{src_root}/System/Library/LaunchAngels'
+ os.makedirs(dest, exist_ok=True)
+ for label in labels:
+-    with open(f'{src}/{label}.plist', 'rb') as f:
++    # A few system UI services are launch angels, not launch daemons. They are
++    # normally copied by --rest, but a named service (for example PosterBoard)
++    # must be looked up in LaunchAngels when requested explicitly.
++    plist = f'{src}/{label}.plist'
++    if not os.path.isfile(plist) and os.path.isdir(angels):
++        angel_plist = f'{angels}/{label}.plist'
++        if os.path.isfile(angel_plist):
++            plist = angel_plist
++    with open(plist, 'rb') as f:
+         job = plistlib.load(f)
+     job['StandardErrorPath'] = '/dev/console'
