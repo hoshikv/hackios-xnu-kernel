@@ -15,7 +15,7 @@ load_device() {
 	# shellcheck disable=SC1090
 	. "$conf"
 	DEVICE=$name
-	export DEVICE KIND
+	export DEVICE KIND WIFI_BDF
 	echo "${0##*/}: device $DEVICE -- $NAME ($KIND)"
 }
 

@@ -46,11 +46,25 @@ hk_board_number(const char *name, uint32_t dflt)
 }
 
 void
+hk_board_text(const char *name, const char *dflt, char *value, uint32_t size)
+{
+	char arg[40] = "board_";
+
+	if (size == 0) {
+		return;
+	}
+	strlcpy(value, dflt, size);
+	strlcat(arg, name, sizeof(arg));
+	(void)PE_parse_boot_argn(arg, value, (int)size);
+}
+
+void
 hk_board_report(void)
 {
 	static const char *const names[] = { "epss", "cmd_db", "rsc", "tsens0", "tsens1", "tsens2", "smem", "aoss", "ipcc",
 		                             "tlmm", "wpss_mem", "wifi_iova", "wifi_msi", "gcc", "dispcc", "intf", "ufshc", "spmi_core",
 		                             "spmi_cnfg", "spmi_obsrvr" };
+	char bdf[20];
 	int given = 0;
 
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -63,5 +77,9 @@ hk_board_report(void)
 	}
 	if (given == 0) {
 		printf("board: no board_ addresses given: the POCO X5 Pro's (SM7325) for every block\n");
+	}
+	hk_board_text("wifi_bdf", "m20gl", bdf, sizeof(bdf));
+	if (strcmp(bdf, "m20gl") != 0) {
+		printf("board: Wi-Fi board data variant %s\n", bdf);
 	}
 }

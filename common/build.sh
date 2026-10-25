@@ -46,9 +46,9 @@ fi
 if ! skip images; then
 	have_userland
 	[ -d ios165/rootfs ] || die "no iOS files yet: run ios165/fetch.sh first (it downloads them from Apple to this machine)"
-	# The Peridot branch carries a small userland build fix until it is upstream: include
-	# adsp_dtb.mdt and its segments with the ADSP firmware, which the DSP requires at PAS 0x24.
-	P=common/patches/userland-adsp-dtb.patch
+	# The Peridot branch carries firmware packaging fixes until they are upstream: include the
+	# complete ADSP/WPSS segment sets, the ADSP DT image, and this board's QCA6750 data.
+	P=common/patches/userland-peridot-firmware.patch
 	USERLAND_PATCH_APPLIED=0
 	if ! git apply --reverse --check "$P" >/dev/null 2>&1; then
 		git apply --check "$P" || die "cannot apply the Peridot ADSP-DTB userland patch"
@@ -60,7 +60,7 @@ if ! skip images; then
 	if [ "$USERLAND_PATCH_APPLIED" = 1 ]; then
 		trap 'git apply --reverse "$P"' EXIT
 	fi
-	env REST=1 $USERLAND_VARS "$@" userland/build.sh
+	env REST=1 WIFI_BDF="${WIFI_BDF:-m20gl}" $USERLAND_VARS "$@" userland/build.sh
 	if [ "$USERLAND_PATCH_APPLIED" = 1 ]; then
 		git apply --reverse "$P"
 		trap - EXIT

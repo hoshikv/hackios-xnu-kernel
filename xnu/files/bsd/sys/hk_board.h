@@ -18,6 +18,8 @@ extern "C" {
 vm_offset_t hk_board_addr(const char *name, vm_offset_t dflt);
 /* a number of the board (counts, sizes): board_<name>=, else `dflt` */
 uint32_t hk_board_number(const char *name, uint32_t dflt);
+/* the per-device WLAN BDF selector: board_<name>=, copied into caller storage */
+void hk_board_text(const char *name, const char *dflt, char *value, uint32_t size);
 /* every board_ address that was given, once, to the log (hk_input.c, at the drivers' start) */
 void hk_board_report(void);
 

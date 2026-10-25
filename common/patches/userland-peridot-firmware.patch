@@ -1,0 +1,69 @@
+diff --git a/userland/build.sh b/userland/build.sh
+index 0a28e91..b2197b5 100755
+--- a/userland/build.sh
++++ b/userland/build.sh
+@@ -85,2 +85,37 @@ IOS=../ios165
+ CACHE=$IOS/20F66__iPhone10,3_6
++
++# Keep the ADSP signed device tree beside its firmware; Peridot's DSP does not answer until PAS 0x24 has it.
++copy_adsp_firmware() {
++	local destination=$1 segment
++	[ -f ../fw-audio/adsp.mdt ] || return 0
++	mkdir -p "$destination"
++	cp ../fw-audio/adsp.mdt "$destination/"
++	for segment in ../fw-audio/adsp.b*; do
++		[ -f "$segment" ] || continue
++		cp "$segment" "$destination/"
++	done
++	if [ -f ../fw-audio/adsp_dtb.mdt ]; then
++		cp ../fw-audio/adsp_dtb.mdt "$destination/"
++		for segment in ../fw-audio/adsp_dtb.b*; do
++			[ -f "$segment" ] || continue
++			cp "$segment" "$destination/"
++		done
++	fi
++}
++
++# Package every WPSS segment and this board's QCA6750 BDF, pulled from the phone's modem image.
++copy_wifi_firmware() {
++	local destination=$1 segment board=${WIFI_BDF:-m20gl} file
++	[ -f ../fw-wifi/wpss.mdt ] || return 0
++	mkdir -p "$destination"
++	cp ../fw-wifi/wpss.mdt "$destination/"
++	for segment in ../fw-wifi/wpss.b*; do
++		[ -f "$segment" ] || continue
++		cp "$segment" "$destination/"
++	done
++	for file in "../fw-wifi/bd_$board.elf" "../fw-wifi/qca6750/bd_$board.elf" ../fw-wifi/qca6750/regdb_xiaomi.bin; do
++		[ -f "$file" ] || continue
++		cp "$file" "$destination/"
++	done
++}
+ # ios165/rootfs and ios165/cryptex must be this copy's own directories of hard links, the way
+@@ -557,7 +592,3 @@ fi
+ if [ -f ../fw-wifi/wpss.mdt ]; then
+-	mkdir -p root/fw
+-	install -m 0644 ../fw-wifi/wpss.mdt ../fw-wifi/wpss.b0[2-9] root/fw/
+-	for f in bd_m20gl.elf regdb_xiaomi.bin; do
+-		[ -f ../fw-wifi/qca6750/$f ] && install -m 0644 ../fw-wifi/qca6750/$f root/fw/
+-	done
++	copy_wifi_firmware root/fw
+ 	# the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
+@@ -596,4 +627,3 @@ done
+ if [ -n "$ADSP" ] && [ -f ../fw-audio/adsp.mdt ]; then
+-	mkdir -p root/fw
+-	install -m 0644 ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] root/fw/
++	copy_adsp_firmware root/fw
+ fi
+@@ -673,4 +703,3 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+ 	if [ -f ../fw-audio/adsp.mdt ]; then
+-		mkdir -p flashboot/fw
+-		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] flashboot/fw/
++		copy_adsp_firmware flashboot/fw
+ 	fi
+@@ -743,4 +772,3 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
+ 	if [ -f ../fw-audio/adsp.mdt ]; then
+-		mkdir -p sysroot/fw
+-		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
++		copy_adsp_firmware sysroot/fw
+ 	fi

@@ -168,6 +168,7 @@
 #include <sys/errno.h>
 #include <sys/hk_input.h>
 #include <sys/hk_board.h>
+#include <sys/hk_wifi.h>
 #include <sys/hk_qrtr.h>
 #include <sys/hk_sta.h>
 #include <sys/stat.h>
@@ -1240,7 +1241,7 @@ static struct block tlmm = { "tlmm", 0x0f100000, 0x00100000 };
 static bool
 step_pins(void)
 {
-	static const struct {
+	const struct {
 		unsigned pin;
 		const char *what;
 	} pins[] = {
@@ -3973,6 +3974,21 @@ radio_space_try(void)
 
 /* ---- for the driver (hk_lx.c): the firmware's processor, and files ------------------------------- */
 
+const char *
+hk_wifi_board_data_file(void)
+{
+	static char file[32];
+	static bool initialized;
+	char board[20];
+
+	if (!initialized) {
+		hk_board_text("wifi_bdf", "m20gl", board, sizeof(board));
+		snprintf(file, sizeof(file), "bd_%s.elf", board);
+		initialized = true;
+	}
+	return file;
+}
+
 bool
 hk_wifi_dsp_is_up(void)
 {
@@ -3991,10 +4007,13 @@ hk_wifi_dsp_is_up(void)
 const uint8_t *
 hk_wifi_driver_file(const char *name, uint64_t *size)
 {
-	static const char *const files[][2] = { { "board.bin", "bd_m20gl.elf" }, { "regdb.bin", "regdb_xiaomi.bin" } };
+	static const char *const files[][2] = { { "regdb.bin", "regdb_xiaomi.bin" } };
 	const char *last = strrchr(name, '/');
 
 	last = last == NULL ? name : last + 1;
+	if (strcmp(last, "board.bin") == 0) {
+		return image_file(hk_wifi_board_data_file(), size);
+	}
 	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
 		if (strcmp(last, files[i][0]) == 0) {
 			return image_file(files[i][1], size);
