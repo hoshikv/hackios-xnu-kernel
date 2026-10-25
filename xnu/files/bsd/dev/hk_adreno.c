@@ -3298,7 +3298,8 @@ hk_adreno_quiesce(void)
  * (hk_gpu_recover() below, which says what is done and which source says so). Without it
  * such a submission is only reported, and the GPU stays stopped.
  */
-#define GPU_CHIP_ID             0x06030500ull   /* dt: qcom,chipid */
+/* qcom,chipid from the board DT: Redwood is 0x06030500, Peridot's A735 is 0x43030b00. */
+static uint64_t gpu_chip_id = 0x06030500ull;
 #define GPU_ADDRESSES_START     0x20000000ull   /* above everything the steps use; below 4 GB, as Linux keeps them */
 #define GPU_ADDRESSES_SIZE      0xe0000000ull
 #define GPU_FENCE_AT            0x40            /* in the scratch page */
@@ -3477,7 +3478,7 @@ hk_gpu_parameter(uint32_t which, uint64_t *value)
 		*value = 512 * 1024;
 		return true;
 	case 0x03:                              /* CHIP_ID, with the speed bin above it */
-		*value = GPU_CHIP_ID | (uint64_t)speed_bin << 32;
+		*value = gpu_chip_id | (uint64_t)speed_bin << 32;
 		return true;
 	case 0x04:                              /* MAX_FREQ */
 		*value = core_khz * 1000ull;
@@ -4160,6 +4161,9 @@ hk_adreno_init(void)
 	};
 	uint32_t only = 0, done = 0, failed = 0, keep = 0;
 	bool by_itself = false;
+
+	/* Mesa/freedreno selects its hardware backend from this ID; never advertise A635 on Peridot. */
+	gpu_chip_id = hk_board_number("gpu_chip", (uint32_t)gpu_chip_id);
 
 	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
 		display_probe();

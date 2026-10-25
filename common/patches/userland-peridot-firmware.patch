@@ -67,3 +67,28 @@ index 0a28e91..b2197b5 100755
 -		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
 +		copy_adsp_firmware sysroot/fw
  	fi
+diff --git a/userland/src/hkmetal.m b/userland/src/hkmetal.m
+index ca4339e..9a0c489 100644
+--- a/userland/src/hkmetal.m
++++ b/userland/src/hkmetal.m
+@@ -2400,6 +2400,4 @@ struct gem_close { uint32_t handle, pad; };
+ /* Without this the device inherits _MTLDevice's own answer, which is "Apple GPU" -- true of
+- * the code and false of the hardware. The name is Mesa's renderer string for this chip
+- * (docs/air.md: `Adreno 7c+ Gen 3, chip 0x06030500`), and the identifier beside it is asked
+- * of the kernel rather than written down, so a different phone says something different.
+- * Nothing in Metal's registration reads this; a person reading a log does. */
++ * the code and false of the hardware. Keep the reported name in step with the board ID that
++ * the kernel gives Mesa: Peridot's DT identifies its Adreno 735 as 0x43030b00. */
+ - (NSString *)name
+@@ -2409,2 +2407,6 @@ struct gem_close { uint32_t handle, pad; };
+ 	if (gpu_param(_gpu, 0x03, &chip)) {
++		if ((chip & 0xffffffffu) == 0x43030b00u) {
++			return [NSString stringWithFormat:@"Adreno 735 (chip %#x, Peridot)",
++					 (unsigned)(chip & 0xffffffffu)];
++		}
+ 		return [NSString stringWithFormat:@"Adreno 7c+ Gen 3 (chip %#x, Redwood)",
+@@ -2412,3 +2414,3 @@ struct gem_close { uint32_t handle, pad; };
+ 	}
+-	return @"Adreno (Redwood; the GPU is not started)";
++	return @"Adreno (GPU is not started)";
+ }
