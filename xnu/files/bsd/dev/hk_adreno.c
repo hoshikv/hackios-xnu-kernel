@@ -108,7 +108,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
-#define PERIDOT_GPU_STEPS       17u             /* steps 1 to 17 are ported to the Cliffs GPU block; later ones are not */
+#define PERIDOT_GPU_STEPS       22u             /* all 22 steps are ported to the Cliffs GPU block */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20, gmu_skip, aperture_reg;
 static uint32_t gmu_chip = 0x07010100u;
 static uint32_t step;                   /* the one being performed */
@@ -2675,8 +2675,8 @@ step_core_space(void)
 		return false;
 	}
 	PE_parse_boot_argn("adreno_stream1", &stream1, sizeof(stream1));
-	announce("make the 3D core's memory: its ring, its microcode (fw/a660_sqe.fw), a page to try writing to");
-	microcode = image_file("fw", "a660_sqe.fw", &size);
+	announce("make the 3D core's memory: its ring, its microcode (fw/gen71100_sqe.fw), a page to try writing to");
+	microcode = image_file("fw", "gen71100_sqe.fw", &size);
 	if (microcode == NULL || size < 8 || size > 0x40000 ||
 	    !block_new(&core_space, &core_ring, CORE_RING_ADDRESS, CORE_RING_SIZE, PTE_CORE) ||
 	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)size - 4, PTE_CORE | PTE_READ_ONLY) ||
@@ -2732,7 +2732,7 @@ step_core_space(void)
  * (Step 21 is what tells whether the 3D core gets out of secure mode with it.) There was a
  * boot-arg adreno_zap=0 for the second and later runs of a started phone; nothing reads it now.
  */
-#define ZAP_MEMORY              0x8b71a000ull
+#define ZAP_MEMORY              0x9899a000ull
 #define ZAP_MEMORY_SIZE         0x2000u
 #define SCM_PAS_MEM_SETUP       SCM_CALL(2, 2)
 #define SCM_THREE_VALUES        3
@@ -2750,9 +2750,10 @@ zap_unload(void)
 static bool
 step_zap_load(void)
 {
-	const uint8_t *segment;
+	const uint8_t *fw;
 	volatile uint8_t *memory;
-	uint64_t size = 0, header = 0, answer = ~0ull;
+	uint64_t size = 0, header = 0, answer = ~0ull, lo = ~0ull, hi = 0;
+	uint32_t phoff, phent, phnum;
 
 	if (!cx_ready() || !core_is_on) {
 		return false;
@@ -2760,8 +2761,33 @@ step_zap_load(void)
 	announce("ask TrustZone to give up a zap shader that a kernel before this one may have left");
 	printf("adreno: %u: %s\n", step, zap_unload() ? "TrustZone has given up what it had (it says so with none, too)" :
 	    "TRUSTZONE DOES NOT GIVE IT UP: the next answers tell whether it keeps one");
-	segment = image_file("fw", "a660_zap.b02", &size);
-	if (segment == NULL || size == 0 || size > 0x1000) {
+	fw = image_file("fw", ZAP_FILE, &size);
+	if (fw == NULL || size < 52 || memcmp(fw, "\177ELF\1", 5) != 0) {
+		return false;
+	}
+	phoff = le32(fw + 28);
+	phent = le16(fw + 42);
+	phnum = le16(fw + 44);
+	if (phent != 32 || phnum < 2 || phnum > 16 || phoff + (uint64_t)phnum * 32 > size) {
+		return false;
+	}
+	for (uint32_t i = 0; i < phnum; i++) {
+		const uint8_t *ph = fw + phoff + i * 32;
+		uint32_t type = le32(ph), off = le32(ph + 4), paddr = le32(ph + 12);
+		uint32_t filesz = le32(ph + 16), memsz = le32(ph + 20), flags = le32(ph + 24);
+
+		if (type != 1 || ((flags >> 24) & 7) == 2 || filesz == 0 || off + filesz > size) {
+			continue;
+		}
+		if (paddr < lo) {
+			lo = paddr;
+		}
+		if (paddr + memsz > hi) {
+			hi = paddr + memsz;
+		}
+	}
+	if (lo >= hi || hi - lo > ZAP_MEMORY_SIZE) {
+		printf("adreno: %u: the zap image's loadable range is not in its reserved memory\n", step);
 		return false;
 	}
 	announce("hand the zap shader's header to TrustZone, tell it where the image goes, put the image there, and ask "
@@ -2776,22 +2802,33 @@ step_zap_load(void)
 		zap_is_loaded = true;
 		return true;
 	}
-	if (scm("where the image will be", SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_GPU, ZAP_MEMORY, 0x1000,
-	    &answer) != 0 || answer != 0) {
+	if (scm("where the image will be", SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_GPU, ZAP_MEMORY,
+	    hi - lo, &answer) != 0 || answer != 0) {
 		printf("adreno: %u: TrustZone does not take the place (%#llx): TAKEN TO MEAN THAT IT KEEPS A ZAP SHADER FROM "
 		    "BEFORE, which is used as it is\n", step, answer);
 		zap_is_loaded = true;
 		return true;
 	}
-	/* (the memory is looked at only now: TrustZone has just said that it is not its own) */
 	memory = (volatile uint8_t *)ml_io_map_wcomb(ZAP_MEMORY, ZAP_MEMORY_SIZE);
-	printf("adreno: %u: the reserved memory begins %02x %02x %02x %02x, the zap shader %02x %02x %02x %02x\n", step,
-	    memory[0], memory[1], memory[2], memory[3], segment[0], segment[1], segment[2], segment[3]);
-	printf("adreno: %u: about to write %llu bytes at %#llx\n", step, size, ZAP_MEMORY);
+	printf("adreno: %u: the zap image is %llu bytes at %#llx; loading %llu bytes at %#llx\n", step, size, lo, hi - lo,
+	    ZAP_MEMORY);
 	snprintf(last_write, sizeof(last_write), "step %u wrote the zap shader into memory at %#llx", step, ZAP_MEMORY);
 	hold(true);
-	for (uint64_t i = 0; i < 0x1000; i++) {
-		memory[i] = i < size ? segment[i] : 0;
+	for (uint64_t i = 0; i < ZAP_MEMORY_SIZE; i++) {
+		memory[i] = 0;
+	}
+	for (uint32_t i = 0; i < phnum; i++) {
+		const uint8_t *ph = fw + phoff + i * 32;
+		uint32_t type = le32(ph), off = le32(ph + 4), paddr = le32(ph + 12);
+		uint32_t filesz = le32(ph + 16), memsz = le32(ph + 20), flags = le32(ph + 24);
+
+		if (type != 1 || ((flags >> 24) & 7) == 2 || filesz == 0 || off + filesz > size || paddr < lo ||
+		    paddr - lo + memsz > ZAP_MEMORY_SIZE) {
+			continue;
+		}
+		for (uint32_t b = 0; b < filesz; b++) {
+			memory[paddr - lo + b] = fw[off + b];
+		}
 	}
 	settle();
 	if (scm("to authenticate the zap shader and run it", SCM_64 | SCM_SIP | SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, PAS_GPU, 0,
@@ -4071,7 +4108,7 @@ extern vm_offset_t pe_arm_get_soc_base_phys(void);
 static bool
 start_by_itself(void)
 {
-	static const char *const files[] = { "a660_gmu.bin", "a660_sqe.fw", "a660_zap.mdt", "a660_zap.b02" };
+	static const char *const files[] = { "gen71100_gmu.bin", "gen71100_sqe.fw", "gen71100_zap.mbn" };
 	const char *missing = NULL;
 	uint64_t size;
 
