@@ -3022,6 +3022,7 @@ step_core_commands(void)
 #define DST_BGRA_LINEAR         (FORMAT_8888 | 1u << 10)        /* rows of pixels, blue first in memory */
 #define EVENT_FLUSH_COLOR       0x1d
 #define EVENT_CACHE_FLUSH       0x04
+#define EVENT_IRQ               (1u << 31)
 #define TARGET_WIDTH            1080
 #define TARGET_HEIGHT           2400
 #define TARGET_ROW              4352            /* 1088 pixels: the next multiple of 64 bytes */
@@ -3084,7 +3085,7 @@ step_frame(void)
 	ring(0);
 	ring(0x0c0c0c0c);
 	ring_command(CP_EVENT_WRITE, 4);
-	ring(EVENT_CACHE_FLUSH);
+	ring(EVENT_CACHE_FLUSH | EVENT_IRQ);
 	ring(CORE_SCRATCH_ADDRESS + 16);
 	ring(0);
 	ring(0x0d0e0d0e);
@@ -3767,7 +3768,7 @@ hk_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
 	ring_time(gpu_fence, 1);
 	ring_register(CP_SCRATCH_REG2, gpu_fence);
 	ring_command(CP_EVENT_WRITE, 4);
-	ring(EVENT_CACHE_FLUSH);
+	ring(EVENT_CACHE_FLUSH | EVENT_IRQ);
 	ring(CORE_SCRATCH_ADDRESS + GPU_FENCE_AT);
 	ring(0);
 	ring(gpu_fence);
