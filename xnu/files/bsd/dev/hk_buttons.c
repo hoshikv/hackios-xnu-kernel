@@ -101,6 +101,8 @@ wr(vm_offset_t address, uint32_t value)
 #define ARB_CNFG_SIZE           0x4000UL
 #define ARB_CNFG_PHYS_SIZE      ARB_CNFG_SIZE
 #define ARB_OBSERVER_PHYS       hk_board_addr("spmi_obsrvr", 0x0e600000UL)
+#define ARB_CHANNELS_PHYS       0x0c500000UL
+#define ARB_CHANNELS_SIZE       0x400000UL
 #define ARB_REDWOOD_CORE_PHYS   0x0c440000UL
 #define ARB_REDWOOD_CNFG_PHYS   0x0c40a000UL
 #define ARB_REDWOOD_OBSERVER_PHYS 0x0e600000UL
@@ -124,6 +126,9 @@ wr(vm_offset_t address, uint32_t value)
 #define OBSERVER_STATUS         0x08
 #define OBSERVER_DATA0          0x18            /* the bytes read, the first in the lowest byte */
 #define OBSERVER_DATA1          0x1c
+#define CHANNEL_COMMAND         0x00
+#define CHANNEL_STATUS          0x08
+#define CHANNEL_WDATA0          0x10
 #define STATUS_DONE             0x1
 #define STATUS_FAILURE          0x2
 #define STATUS_DENIED           0x4
@@ -132,6 +137,7 @@ wr(vm_offset_t address, uint32_t value)
 #define READ_TIMEOUT_US         2000            /* a read takes some tens of microseconds */
 
 static vm_offset_t arb_core, arb_cnfg, arb_observer;
+static vm_offset_t arb_channels;
 static vm_offset_t arb_core_phys = ARB_REDWOOD_CORE_PHYS;
 static vm_offset_t arb_cnfg_phys = ARB_REDWOOD_CNFG_PHYS;
 static vm_offset_t arb_observer_phys = ARB_REDWOOD_OBSERVER_PHYS;
@@ -292,6 +298,55 @@ find_channel(struct peripheral *p, uint32_t channels)
 
 #define POLL_MS                 16
 #define MINUTE_TICKS            (60 * 1000 / POLL_MS)
+
+/*
+ * Peridot's device tree sets PMXR2230 GPIO6 (volume-up) to VIN1 and pull-up. The firmware leaves
+ * it at VIN0 and pull-down, so it is stuck low and no press can be detected. Write only those
+ * two GPIO6 input configuration registers through its system-0-owned v7 channel and verify each
+ * value. No PMK8550 or supply-control peripheral is writable through this helper.
+ */
+static const char *
+spmi_write_gpio6_config(uint8_t reg, uint8_t value)
+{
+	vm_offset_t channel;
+	uint64_t start = mach_absolute_time(), now, interval;
+	uint32_t map, owner, status;
+	uint8_t back = 0xff;
+	const char *problem = NULL;
+
+	if (!board_is_peridot() || pin.id != 0x18e || !pin.found || arb_channels == 0 ||
+	    (reg != GPIO_REG_SUPPLY && reg != GPIO_REG_PULL) ||
+	    (reg == GPIO_REG_SUPPLY && value != 1) || (reg == GPIO_REG_PULL && value != 0)) {
+		return "outside the GPIO6 VIN1/pull-up allowlist";
+	}
+	map = rd(arb_core + ARB_CHANNEL(pin.channel));
+	owner = rd(arb_cnfg + ARB_OWNER(pin.channel)) & 7;
+	if (((map >> 8) & 0xfff) != pin.id || owner != ARB_SYSTEM) {
+		return "GPIO6 is not mapped to a system-0-owned write channel";
+	}
+	channel = arb_channels + 0x1000UL * pin.channel;
+	nanoseconds_to_absolutetime(READ_TIMEOUT_US * (uint64_t)NSEC_PER_USEC, &interval);
+	hk_spmi_lock();
+	wr(channel + CHANNEL_WDATA0, value);
+	wr(channel + CHANNEL_COMMAND, (uint32_t)reg << 4); /* v7 extended register write long, one byte */
+	do {
+		status = rd(channel + CHANNEL_STATUS);
+		now = mach_absolute_time();
+	} while (!(status & STATUS_DONE) && now - start < interval);
+	hk_spmi_unlock();
+	if (!(status & STATUS_DONE)) {
+		problem = "write timed out";
+	} else if (status & STATUS_DENIED) {
+		problem = "write denied";
+	} else if (status & STATUS_FAILURE) {
+		problem = "write failed";
+	} else if (status & STATUS_DROPPED) {
+		problem = "write dropped";
+	} else if ((problem = spmi_read(&pin, reg, &back, 1)) == NULL && back != value) {
+		problem = "write did not read back";
+	}
+	return problem;
+}
 
 static struct button {
 	const char *    name;
@@ -458,6 +513,29 @@ pin_input(void)
 	}
 	mode = c[0] & 3;
 	pull = c[GPIO_REG_PULL - GPIO_REG_MODE] & 7;
+	if (board_is_peridot() && mode == 0 && (c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80) &&
+	    ((c[GPIO_REG_SUPPLY - GPIO_REG_MODE] & 7) != 1 || pull != 0)) {
+		printf("buttons: matching the PMXR2230 GPIO6 setup to Peridot's device tree (VIN1, pull-up)\n");
+		problem = spmi_write_gpio6_config(GPIO_REG_SUPPLY, 1);
+		if (problem == NULL) {
+			problem = spmi_write_gpio6_config(GPIO_REG_PULL, 0);
+		}
+		if (problem != NULL) {
+			printf("buttons: GPIO6 configuration was not verified: %s\n", problem);
+			return;
+		}
+		problem = spmi_read(&pin, GPIO_REG_MODE, c, 8);
+		if (problem == NULL) {
+			problem = spmi_read(&pin, REG_RT_STATUS, &status, 1);
+		}
+		if (problem != NULL) {
+			printf("buttons: GPIO6 after configuration: %s\n", problem);
+			return;
+		}
+		pull = c[GPIO_REG_PULL - GPIO_REG_MODE] & 7;
+		printf("buttons: GPIO6 now reads VIN%u, pull %u, level %s\n",
+		    c[GPIO_REG_SUPPLY - GPIO_REG_MODE] & 7, pull, (status & GPIO_LEVEL) ? "high" : "low");
+	}
 	printf("buttons: volume up's pin: mode %u (%s), supply %u, pull %u (%s), %s; registers 0x40.. = %02x %02x %02x %02x %02x %02x "
 	    "%02x %02x; level %s\n", mode, mode == 0 ? "input" : mode == 1 ? "output" : mode == 2 ? "input and output" : "analog",
 	    c[GPIO_REG_SUPPLY - GPIO_REG_MODE] & 7, pull, pull < 4 ? "up" : pull == 4 ? "down" : "none",
@@ -468,7 +546,7 @@ pin_input(void)
 		    "which this driver does not do: volume up is left alone\n");
 		return;
 	}
-	volume_up.active_high = (pull == 4);
+	volume_up.active_high = board_is_peridot() ? false : (pull == 4);
 	volume_up.usable = true;
 	volume_up.last = volume_up.active_high ? !!(status & GPIO_LEVEL) : !(status & GPIO_LEVEL);
 	printf("buttons: volume up's pin keeps itself %s, so the key reads %s: watching it\n",
@@ -501,6 +579,7 @@ buttons_thread(void *parameter, __unused wait_result_t result)
 		pon.name = "the PMK8550's power-on block";
 		pin.name = "GPIO6 of the PMXR2230";
 		pin.id = 0x18e;
+		arb_channels = ml_io_map(ARB_CHANNELS_PHYS, ARB_CHANNELS_SIZE);
 	}
 	printf("buttons: board %s: step 1: map the PMIC arbiter (%#lx, %#lx, %#lx) and read its version\n",
 	    peridot ? "peridot" : "redwood", arb_core_phys, arb_cnfg_phys, arb_observer_phys);
