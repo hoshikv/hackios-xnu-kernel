@@ -5,10 +5,11 @@ hardware and runs the **unmodified iOS 16.5 user space** on top of it: launchd �
 apps. Our own EFI loader, our own replacements for Apple's closed drivers, a UEFI port, and a Linux Wi-Fi driver
 on a compatibility layer make that possible.
 
-This checkout targets the **Xiaomi POCO F6 / Redmi Turbo 3 (codename `peridot`, Qualcomm SM8635 / Snapdragon 8s Gen 3)**.
-The phone boots through stock Fastboot with `fastboot boot`; XNULoader then receives the kernel and system image over USB.
-The current workflow keeps the boot and system images in RAM. Rebooting returns to Android. QEMU (`virt`, aarch64)
-remains available for host-side development.
+It runs in two places:
+
+- **POCO X5 Pro 5G (redwood, Snapdragon 778G)** — nothing is flashed: the UEFI is started with `fastboot boot`,
+  the whole system lives in RAM, and after a reboot the phone is back in Android;
+- **QEMU** (`virt`, aarch64) — the same thing on any Linux computer, no phone needed.
 
 This repository is half of the project:
 
@@ -21,22 +22,31 @@ This repository is half of the project:
 > to *your* machine and extracts what is needed there. HackiOS is an independent research project by OOSEX GANG and
 > is not affiliated with, authorised or endorsed by Apple Inc. iOS, iPhone and Apple are trademarks of Apple Inc.
 
-Peridot support is an active bring-up. Results below distinguish what has been seen on the phone from changes
-that are only built and still need another device run.
+<p>
+<img src="docs/lockscreen.jpg" width="190" alt="Lock screen">
+<img src="docs/homescreen.jpg" width="190" alt="Home screen">
+<img src="docs/control-center.jpg" width="190" alt="Control Center">
+<img src="docs/settings.jpg" width="190" alt="Settings">
+</p>
 
-## Peridot status
+Photographed on the phone, the Adreno GPU drawing (`gpu=1`). More in [Screenshots](#screenshots).
 
-| Area | Current status |
+## What works
+
+| Works | Does not work (yet) |
 |---|---|
-| Boot and userland | UEFI has been booted from stock Fastboot and iOS userland has reached SpringBoard on the POCO F6. |
-| GPU / UI | Adreno A735 accelerated rendering has appeared to work, including a smooth run. Other runs showed frame stalls, black surfaces, missing widgets, and a blue/black wallpaper. XNU framebuffer/GPU recovery changes and userland packed-16-bit/PosterBoard startup changes are prepared; these latest changes have not been validated on the phone yet. The system UI uses the Mesa/Freedreno OpenGL ES path. Full Metal acceleration is experimental and is not established as working. |
-| Touch | Touch input works, but can be delayed or unresponsive. The current profile requests a 4 ms poll interval and 480 Hz; this tuning is not yet verified on-device. |
-| Battery | Battery reporting was observed working in a previous userland run. |
-| Thermal | `thermal=1` enables the kernel frequency governor and `ddr=0` avoids a previously crashing DDR RPMh vote. The phone was reported to get very hot; effective thermal sensor feedback and throttling have not yet been confirmed. |
-| Volume and haptics | Volume up/down and vibration were reported not working. |
-| Wi-Fi, Bluetooth, audio | Not confirmed working on Peridot; treat as unfinished. |
-
-These results are specific to the Peridot port. Redwood screenshots, firmware names, and hardware claims do not describe this target.
+| Lock screen, swipe to unlock, home screen with all icons (two pages), stock iOS 16 wallpapers | Cellular, Bluetooth |
+| System gestures: swipe up (home, app switcher), edge swipe (back), Control Center | Fast charging (PD/PPS); the charger is read, not yet driven |
+| Apps: Settings, Clock, Calendar, Photos, Notes, Safari and more; widgets (Weather, Calendar) on the phone | Metal for apps (in progress: 293 of 456 system shaders already run on the Adreno, see `docs/air.md` in hackios-xnu-userland) |
+| Phone touchscreen (Goodix GT9916), multitouch, wake on touch; real power and volume keys | App Store content and Apple ID sign-in (no Secure Enclave; FairPlay daemon exits) |
+| Up to 8 CPU cores (`cpus=8`), big core at 2.4 GHz, ~20 s to the lock screen | Video and Live Photo recording |
+| Adreno 642L GPU through Mesa/freedreno (`gpu=1`, OpenGL ES for CoreAnimation) | |
+| Wi-Fi (WCN6750, ath11k): join from Settings, Safari over Wi-Fi, 55–90 Mbit/s | |
+| Sound (speakers, main microphone), camera in Camera.app (front/rear, preview, focus, HEIC photos) | |
+| Data that iOS writes survives a reboot (`var_store=1 ufs_write=1`); iOS root volume on the phone's flash | |
+| Charging with `adsp=1`: the audio DSP's charger takes current from USB (seen: +0.4 A from a computer's port), battery health and charger type in `sysctl kern.hackios.charger` | |
+| Frames follow the panel's own scan (`fb_scan=1`): 120 Hz, each frame lands whole in one refresh -- no tearing | |
+| Sileo + Procursus (dpkg, apt), tweaks, SSH | |
 
 It is a research bench, not a ROM: a session lasts a given number of seconds, then the kernel returns to the
 loader and hands over its log.
@@ -74,60 +84,98 @@ The lock screen appears after 2–3 minutes.
 - Right after SpringBoard appears the system is still registering apps: give it 30–40 s.
 - Debian/Ubuntu UEFI firmware: `QEMU_EFI=/usr/share/AAVMF/AAVMF_CODE.fd QEMU_VARS=/usr/share/AAVMF/AAVMF_VARS.fd`.
 
-## On the phone (POCO F6 / Redmi Turbo 3)
+## On the phone (POCO X5 Pro 5G)
 
-You need a **POCO F6 / Redmi Turbo 3 (`peridot`, SM8635)** with an unlocked bootloader, `adb` and `fastboot`.
-The normal bring-up uses stock Fastboot to boot UEFI, then `xl` to upload the kernel and userland to XNULoader.
-It does not require flashing the phone's partitions.
+You need a **POCO X5 Pro 5G (redwood)** with an unlocked bootloader, `adb` and `fastboot`, and the images from the
+section above. Nothing is written to the phone's storage.
 
-**The phone's own firmware** is not in the repository. Collect it from the Peridot phone's Android vendor image.
-The profile expects `fw-gpu`,
-`fw-wifi`, `fw-audio`, and `fw-haptic` directories beside the workspace. The GPU is Adreno A735; its firmware
-uses the `gen71100` family. Exact segment files can vary by vendor build, so copy all segments referenced by each
-manifest rather than assuming a fixed list.
+**The phone's own firmware** is not in the repository and cannot be: it is the vendor's and is taken from the very
+phone it will run on, from its Android:
+
+```sh
+adb pull /vendor/firmware/a660_{gmu.bin,sqe.fw,zap.mdt,zap.b00,zap.b01,zap.b02} fw-gpu/      # GPU (gpu=1)
+adb pull /vendor/firmware_mnt/image/wpss.{mdt,b02,b03,b04,b05,b06,b07} fw-wifi/              # Wi-Fi (wifi=1)
+adb pull /vendor/firmware_mnt/image/adsp.{mdt,b02,...,b36} fw-audio/                         # sound (adsp=1)
+adb pull /vendor/firmware/aw8697_haptic.bin fw-haptic/                                       # haptics
+```
+
+For the **POCO F6 / Redmi Turbo 3 (peridot)** profile, the GPU uses its A735 firmware names instead:
+
+```sh
+adb pull /vendor/firmware/gen71100_{gmu.bin,sqe.fw,zap.mbn} fw-gpu/                       # Adreno A735
+```
 
 Peridot audio also needs the DSP device-tree image and every segment named by its header; without these,
-the DSP may authenticate `adsp.mdt` but fail to announce itself to the application processor:
+the DSP can authenticate `adsp.mdt` but never announce itself to the application processor:
 
 ```sh
 adb pull /vendor/firmware_mnt/image/adsp_dtb.mdt fw-audio/
 # Pull each /vendor/firmware_mnt/image/adsp_dtb.bNN segment referenced by adsp_dtb.mdt into fw-audio/.
 ```
 
-The Peridot input node is `/dev/hk-touch`; the legacy `/dev/redwood-touch` name remains as a compatibility alias.
+The Peridot input device is `/dev/hk-touch`. The kernel also exposes `/dev/redwood-touch` as an alias because
+older prebuilt userland injectors open that path; both names access the same physical-button and touch stream.
 
-The Peridot profile uses `GL=1` and the `gpu=1` boot argument for the Mesa/Freedreno OpenGL ES path. `metal=1`
-only enables an experimental Metal registry switch; it does not mean the compositor or app Metal rendering is
-working. Keep Metal plugin discovery opt-in (`metal_props on`).
+The `peridot-metal` kernel branch pairs with the userland `metal` branch. `common/setup.sh` selects it by default;
+use `USERLAND_REF=metal common/setup.sh` explicitly if you already have another userland checkout. Building
+`peridot` uses `GL=1` and boots with `gpu=1 metal=1`: Mesa/Freedreno provides the accelerated OpenGL ES path,
+and `metal=1` permits the Metal experiment's registry switch. This does not enable the full Metal compositor:
+the working system UI path is OpenGL ES. Metal plugin discovery remains opt-in at runtime (`metal_props on`);
+setting it globally can destabilize processes before the experimental driver is ready.
+
+```sh
+common/build.sh peridot
+```
 
 (Put the `fw-*` directories next to the workspace. Wi-Fi also needs `fw-wifi/mac` — the radio's address on one
 line — and `fw-wifi/network` — network name and password. `userland/build.sh` prints which firmware went in.)
 
 ```sh
-common/build.sh peridot GL=1         # Peridot images and boot artifacts
+common/build.sh redwood GL=1          # images + out/redwood-boot.img
+common/run.sh redwood 900             # loader into RAM, system image into RAM, a 15-minute session
 ```
 
 or step by step with `xl`:
 
 ```sh
-# From stock Fastboot, run the prepared Peridot workflow (paths may be overridden via environment variables).
-./runs.sh
+./xl enter            # Android -> fastboot -> our loader in RAM (fastboot boot); it brings up its own USB link
+./xl ramdisk          # upload the system image into the phone's RAM (2.5 GB, ~80 s), once per loader session
+XL_SECS=900 XL_CMDLINE="touchscreen=1 cpufreq=1 bootcpu=7 cpus=8 gpu=1 wifi=1 adsp=1" ./xl run
 ./xl screenshot shot.png
-./xl reboot           # return to Android
+./xl reboot           # back to Android
 ```
 
 `./xl` with no arguments lists every command (logs, screen and sound recording, camera frames, stop, state...).
 
-## Dual-boot support
+## Install as a dual boot (no computer needed afterwards)
 
-Peridot is currently tested with temporary Fastboot booting and RAM-loaded images. The repository's generic
-dual-boot design and QEMU checks are documented in [docs/INSTALL.md](docs/INSTALL.md); they do not establish that
-dual boot is ready on Peridot.
+HackiOS can live on the phone next to Android: the UEFI with our loader in the spare A/B slot, the kernel and the
+boot volume in darwin, a boot menu at power-on, sessions with no time limit. Android is never written, and fastboot
+always brings it back. See [docs/INSTALL.md](docs/INSTALL.md).
+
+| | |
+|---|---|
+| **Boots from the flash** | no `fastboot boot`, no computer, no RAM-only session: power on, menu, HackiOS |
+| **Two versions installed** | updates go into the other slot; "HackiOS, previous version" is always in the menu |
+| **Boot guard** | a version that does not come up 3 times is skipped by itself -- the previous one boots, then Android |
+| **Verified boot, your key** | SHA-256 of every bundle; with an owner key pinned, Ed25519-signed bundles only |
+| **A/B switch in the loader** | back to Android from the menu: backup GPT first, CRCs, both tables read back |
+| **Device identity checks** | nothing is written to a phone that is not the profile's `CODENAMES` |
+| **Tested on every push** | eight QEMU scenarios of the boot menu and the guard, crypto checked against Python |
+
+```sh
+common/hackios detect                # which profile is the phone on adb? (writes nothing)
+common/hackios doctor redwood        # every precondition, checked (writes nothing)
+common/hackios install redwood
+common/hackios switch redwood hackios
+common/hackios health redwood        # the boot guard's view
+common/hackios test                  # the whole dual boot in QEMU, no phone
+```
 
 ## Prebuilt boot image
 
-Build Peridot boot artifacts with `common/build.sh peridot GL=1`. Confirm the device/codename before using any
-release image; a Redwood image is not suitable for Peridot. No Apple files are included in the boot image.
+Every release has `hackios-redwood-boot.img` attached: the redwood UEFI with our loader inside, ready for
+`fastboot boot`. It contains no Apple files; the system image is still made on your machine (above).
 
 ## Building from source
 
@@ -150,7 +198,7 @@ common/new-device.sh <codename> path/to/device.dtb   # profile + loader platform
 ```
 
 Then follow [docs/PORTING.md](docs/PORTING.md): the UEFI port, the loader's platform description, the kernel's
-drivers, the firmware. Device profiles live in `common/devices/` (`peridot.conf`, `qemu-virt.conf`, `_template.conf`).
+drivers, the firmware. Device profiles live in `common/devices/` (`redwood.conf`, `qemu-virt.conf`, `_template.conf`).
 
 ## How it works
 
@@ -161,11 +209,11 @@ fastboot boot ──► UEFI (Mu-Silicium) ──► xnuloader (EFI application)
                                            ▼
             XNU (BCM2837 config as the base + our platform)
               ├─ GICv3, timer, video console, return to the loader
-              ├─ APFS (system images uploaded to RAM for the current Peridot run), ramfs (/private/var, /tmp)
+              ├─ APFS (images in RAM, iOS volume on flash), ramfs (/private/var, /tmp)
               ├─ minicrypto instead of corecrypto, AMFI and Sandbox stand-ins (MAC policies)
               ├─ driver replacements: IOSurface, IOMobileFramebuffer, AppleKeyStore, network stack
-              ├─ input: /dev/hk-touch ◄─ Peridot touchscreen / virtio-input (QEMU)
-              ├─ GPU: Adreno A735 (experimental Mesa/Freedreno path); Wi-Fi: WCN6750 (ath11k); sound: ADSP / virtio-sound
+              ├─ input: /dev/hk-touch ◄─ Goodix GT9916 (phone) / virtio-input (QEMU)
+              ├─ GPU: Adreno 642L, Wi-Fi: WCN6750 (ath11k via LinuxKPI), sound: ADSP / virtio-sound
               ▼
    iOS 16.5 launchd → logd, notifyd, cfprefsd, runningboardd, backboardd, SpringBoard, apps
               ├─ our libraries are injected into backboardd, SpringBoard and mediaserverd
@@ -204,7 +252,7 @@ kernel (driver replacements) or by a library the kernel injects with `DYLD_INSER
 
 ## Screenshots
 
-The screenshots below are inherited project examples and are not Peridot validation evidence.
+From the phone's screen, one session (`GL=1 REST=1`, `gpu=1`):
 
 <p>
 <img src="docs/homescreen-2.jpg" width="160" alt="Home screen, page 2">
@@ -231,8 +279,8 @@ The screenshots below are inherited project examples and are not Peridot validat
   `xnu/files/bsd/miscfs/apfs/libdeflate/` — libdeflate 1.24 (Eric Biggers, MIT, `COPYING` there).
 - ath11k, Linux and FreeBSD sources are not in the repository: `tools/mk-ath11k.sh` fetches pinned releases.
   `wifi/lx/patches/*.patch` are our changes to FreeBSD headers; the rest of `wifi/lx/` is ours.
-- `uefi/files/Binaries/` and `prebuilt/uefi/SILICIUM_UEFI.fd` contain UEFI drivers from device firmware, distributed
-  the way Project Silicium distributes them for supported devices;
+- `uefi/files/Binaries/redwood` and `prebuilt/uefi/SILICIUM_UEFI.fd` contain UEFI drivers from the phone's
+  Xiaomi firmware, distributed the way Project Silicium distributes them for other devices;
   `prebuilt/uefi/mkbootimg.py` — AOSP, Apache-2.0.
 - This repository is licensed under the [Apple Public Source License 2.0](LICENSE): our changes to XNU are a derivative of XNU and must be, and our other code here (loader, scripts) is released under the same license. Third-party code keeps its own license, as listed above.
 
