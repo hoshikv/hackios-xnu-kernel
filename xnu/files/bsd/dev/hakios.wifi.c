@@ -31,10 +31,9 @@
  *   2  reads   the always-on processor's mailbox and the doorbells, as they are
  *   3  reads   RPMh: where it has the supplies involved, and what the application processor's
  *              sequencer holds in its command slots (what was last asked for from here)
- *   4  reads   the supplies themselves, from the two PMICs that make the radio's three
- *              (PM7325 S7, S1, S8) and the two the DSP runs from (CX and MX: PM8350C S2 and
- *              S10). The only thing written is the command word that asks the PMIC arbiter for
- *              a read
+ *   4  reads   the supplies themselves, from the board's two PMICs (redwood: PM7325 S7, S1, S8
+ *              and PM8350C S2 and S10; Peridot: PMXR2230 S3B, S1B, S2B and PM8550VS). The only
+ *              thing written is the command word that asks the PMIC arbiter for a read
  *   5  reads   the radio's pins
  *   6  reads   the firmware in the small image: is it whole, does it fit the reserved memory
  *   7  writes  the always-on processor's mailbox open: five words of its message memory, and
@@ -764,7 +763,7 @@ step_smem(void)
 	struct smp2p words;
 	uint32_t version = 0, size = 0, at;
 
-	announce("map the shared memory area (0x80900000, 2 MB: memory, not registers) and read how the boot loader laid it out");
+	announce("map the shared memory area (2 MB: memory, not registers) and read how the boot loader laid it out");
 	if (!smem_peek(SMEM_VERSION, &version, sizeof(version)) || !smem_peek(SMEM_SIZE - 0x1000, &table, sizeof(table))) {
 		return false;
 	}
@@ -871,7 +870,7 @@ step_mailbox(void)
 		get(&aoss, "the length of the message in our mailbox", box);
 	}
 
-	announce("read who has rung our doorbell (IPCC, 0x408000: the first access to that block)");
+	announce("read who has rung our doorbell (IPCC: the first access to that block)");
 	get(&ipcc, "received", IPCC_RECEIVED);
 	return true;
 }
@@ -1003,22 +1002,26 @@ static bool
 step_rpmh(void)
 {
 	static const char *const kinds[] = { "at once", "at once", "asleep", "asleep", "asleep", "awake", "awake", "awake" };
+	char cx[16], xo[16], rfa[16];
 	uint32_t id, config, count, commands;
 
-	announce("look up the supplies involved in the boot loader's list of RPMh resources (memory at 0x80860000)");
+	announce("look up the supplies involved in the boot loader's list of RPMh resources");
 	if (!cmd_db_there()) {
 		printf("wifi: %u: the list is not there\n", step);
 		return false;
 	}
+	hakios_board_text("wifi_rail_cx", "smpb7", cx, sizeof(cx));
+	hakios_board_text("wifi_rail_xo", "smpb1", xo, sizeof(xo));
+	hakios_board_text("wifi_rail_rfa", "smpb8", rfa, sizeof(rfa));
 	show_rpmh_resource("cx.lvl", "the DSP's logic; dt: vdd_cx of qcom,wpss@8a00000, asked 384 while it boots");
 	show_rpmh_resource("mx.lvl", "its memories; dt: vdd_mx, the same");
 	show_rpmh_resource("xo.lvl", "the crystal oscillator; dt: its clock \"xo\"");
-	show_rpmh_resource("smpb7", "PM7325 S7: the radio's vdd-cx-mx");
-	show_rpmh_resource("smpb1", "PM7325 S1: the radio's vdd-1.8-xo");
-	show_rpmh_resource("smpb8", "PM7325 S8: the radio's vdd-1.3-rfa");
+	show_rpmh_resource(cx, "the radio's vdd-cx-mx");
+	show_rpmh_resource(xo, "the radio's vdd-1.8-xo");
+	show_rpmh_resource(rfa, "the radio's vdd-1.3-rfa");
 
-	announce("read the application processor's RPMh sequencer (0x18220000: the first access to that block): its version, "
-	    "and the commands its slots hold");
+	announce("read the application processor's RPMh sequencer (the first access to that block): its version, and the "
+	    "commands its slots hold");
 	id = get(&rsc, "id", RSC_ID);
 	config = get(&rsc, "configuration", RSC_CONFIG);
 	if (((id >> 16) & 0xff) >= 3) {
@@ -1054,7 +1057,8 @@ step_rpmh(void)
 /*
  * The PMIC arbiter, as in hakios.buttons.c: reads go through the "observer" channels, which
  * every system has for every peripheral, whoever owns it. dt: qcom,spmi@c440000; on the bus the
- * PM7325 is slave 1 and the PM8350C slave 2.
+ * board's two PMICs are slaves 1 and 2 (redwood: PM7325 and PM8350C; Peridot: PMXR2230 and
+ * PM8550VS).
  */
 static struct block arb_core = { "arbiter", 0x0c440000, 0x1100 };
 static struct block arb_cnfg = { "arbiter's owners", 0x0c40a000, 0x1000 };
@@ -1147,10 +1151,12 @@ spmi_read(int channel, uint8_t reg, uint8_t *bytes, uint32_t count)
 static bool
 step_rails(void)
 {
+	char pmic1[16], pmic2[16];
 	uint32_t version;
 
-	announce("map the PMIC arbiter (0xc440000, 0xc40a000, 0xe600000; the buttons' driver reads through it too) and read "
-	    "its version");
+	hakios_board_text("wifi_pmic1", "PM7325", pmic1, sizeof(pmic1));
+	hakios_board_text("wifi_pmic2", "PM8350C", pmic2, sizeof(pmic2));
+	announce("map the PMIC arbiter (the buttons' driver reads through it too) and read its version");
 	version = get(&arb_core, "version", ARB_VERSION);
 	arb_channels = get(&arb_core, "features", ARB_FEATURES) & 0x7ff;
 	need(&arb_cnfg);
@@ -1163,9 +1169,9 @@ step_rails(void)
 		arb_channels = 512;
 	}
 
-	announce("ask every peripheral of the PM7325 (slave 1) and the PM8350C (slave 2) what it is, and the switching "
-	    "regulators among them what they make (the first transfers of ours on the SPMI bus: for each a command word "
-	    "written to the arbiter, nothing to a PMIC)");
+	announce("ask every peripheral of the two PMICs (slaves 1 and 2) what it is, and the switching regulators among them "
+	    "what they make (the first transfers of ours on the SPMI bus: for each a command word written to the arbiter, "
+	    "nothing to a PMIC)");
 	for (uint16_t slave = 1; slave <= 2; slave++) {
 		static uint8_t types[256][2];
 		static bool there[256];
@@ -1188,7 +1194,7 @@ step_rails(void)
 				    types[peripheral][1]);
 			}
 			if (at > 0 && (at > (int)sizeof(line) - 80 || peripheral == 255)) {
-				printf("wifi: %u: slave %u (%s), peripheral:type/subtype:%s\n", step, slave, slave == 1 ? "PM7325" : "PM8350C",
+				printf("wifi: %u: slave %u (%s), peripheral:type/subtype:%s\n", step, slave, slave == 1 ? pmic1 : pmic2,
 				    line);
 				at = 0;
 			}
@@ -1886,8 +1892,8 @@ step_image(void)
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the DSP's memory (0x9ae00000, 25 MB: memory of nobody's until TrustZone "
-	    "starts the DSP), with zeroes where a segment is longer than its file, and read them back");
+	announce("put the image's segments into the DSP's memory (memory of nobody's until TrustZone starts the DSP), with "
+	    "zeroes where a segment is longer than its file, and read them back");
 	/*
 	 * (The memory is looked at only now: TrustZone has just said that it is not its own. And it
 	 * is mapped for as long as this takes: 25 MB do not fit where ml_io_map() puts what stays.)
