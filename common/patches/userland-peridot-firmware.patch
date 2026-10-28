@@ -2,7 +2,7 @@ diff --git a/userland/build.sh b/userland/build.sh
 index 0a28e91..6b5fbd0 100755
 --- a/userland/build.sh
 +++ b/userland/build.sh
-@@ -83,6 +83,41 @@ LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
+@@ -83,6 +83,53 @@ LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
  DYN="xnu-clang -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
  IOS=../ios165
  CACHE=$IOS/20F66__iPhone10,3_6
@@ -41,10 +41,22 @@ index 0a28e91..6b5fbd0 100755
 +		cp "$file" "$destination/"
 +	done
 +}
++
++# Keep the WCN6750 patch and NVM beside the other firmware; the small image's
++# /fw is where bsd/dev/hakios.bt.c reads them.
++copy_bt_firmware() {
++	local destination=$1 file
++	[ -d ../fw-bt ] || return 0
++	mkdir -p "$destination"
++	for file in msbtfw12.mbn msbtfw12.tlv msnv12.bin; do
++		[ -f "../fw-bt/$file" ] || continue
++		install -m 0644 "../fw-bt/$file" "$destination/"
++	done
++}
  # ios165/rootfs and ios165/cryptex must be this copy's own directories of hard links, the way
  # tools/new-workspace.sh makes them. A symlink to another copy's tree makes sysroot a symlink too, because
  # cp -a does not follow one, and then every rm -rf and mv below edits the shared extraction in place. That
-@@ -103,7 +138,7 @@ IOS_JOBS=${JOBS-"
+@@ -103,7 +150,7 @@ IOS_JOBS=${JOBS-"
  	com.apple.backboardd com.apple.mobile.usermanagerd com.apple.mobilegestalt.xpc com.apple.lsd
  	com.apple.powerd com.apple.analyticsd com.apple.logd_helper
  	com.apple.iconservices.iconservicesagent com.apple.pluginkit.pkd
@@ -53,9 +65,10 @@ index 0a28e91..6b5fbd0 100755
  "}
  # iOS's own Wi-Fi daemon, for Settings to have a Wi-Fi to show: the kernel answers it in
  # bsd/dev/hk_apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
-@@ -555,11 +590,7 @@ fi
+@@ -555,11 +602,8 @@ fi
  # (bsd/dev/hk_wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
  # board data and the regulatory database (image/qca6750 there; 60 and 24 KB)
++copy_bt_firmware root/fw
  if [ -f ../fw-wifi/wpss.mdt ]; then
 -	mkdir -p root/fw
 -	install -m 0644 ../fw-wifi/wpss.mdt ../fw-wifi/wpss.b0[2-9] root/fw/
@@ -66,7 +79,7 @@ index 0a28e91..6b5fbd0 100755
  	# the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
  	# so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
  	rm -f root/fw/network
-@@ -594,8 +625,7 @@ done
+@@ -594,8 +638,7 @@ done
  # adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
  # the loader takes.
  if [ -n "$ADSP" ] && [ -f ../fw-audio/adsp.mdt ]; then
@@ -76,7 +89,7 @@ index 0a28e91..6b5fbd0 100755
  fi
  # Firmware that is not there is otherwise silent at build time and speaks only much later, deep in a
  # device log -- "adreno: THE GPU IS NOT STARTED: the small image has no fw/a660_gmu.bin" cost a phone
-@@ -671,8 +701,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+@@ -671,8 +714,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
  	# reads the firmware as soon as there is a root (this image, adsp=1), the configuration maybe later -- by then
  	# from the iOS volume's /fw, which src/init.c (flash_root) binds to this
  	if [ -f ../fw-audio/adsp.mdt ]; then
@@ -86,7 +99,7 @@ index 0a28e91..6b5fbd0 100755
  	fi
  	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
  		mkdir -p flashboot/fw
-@@ -741,8 +770,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
+@@ -741,8 +783,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
  	# the audio DSP's firmware, the phone's own from ../fw-audio (never in the repository), where the kernel reads
  	# it once the root is mounted (bsd/dev/hk_adsp.c, adsp=1): 20 MB that do not fit beside GL=1 in the small image
  	if [ -f ../fw-audio/adsp.mdt ]; then
