@@ -1,21 +1,28 @@
 /*
- * The thermal governor of the POCO X5 Pro (redwood): which of the SoC's temperature sensors there
- * are, where each sits, how warm it may get, and the decision made every tick -- how fast each group
- * of processor cores may run, and how hot iOS should be told the phone is.
+ * The thermal governor of the POCO F6 / Redmi Turbo 3 (peridot): which of the SoC's temperature
+ * sensors there are, where each sits, how warm it may get, and the decision made every tick -- how
+ * fast each group of processor cores may run, and how hot iOS should be told the phone is.
  *
  * Only the decision is here, as inline functions with no kernel in them: bsd/dev/hakios.thermal.c
  * reads the sensors and carries the decision out, and tools/thermal-test compiles this same header
  * on the computer and drives it through heat-ups, cool-downs, failing sensors and a hot battery.
  *
- * The sensors: the SoC has two TSENS blocks (dt: tsens@c222000 with its readings at 0xc263000, 15
- * sensors; tsens@c223000 at 0xc265000, 12 sensors). Which sensor is where, and the limits, come from
- * the phone's own device tree (its thermal-zones: the "-step" zones are where Xiaomi's kernel starts
- * to slow the cores, the "-usr" zones where it shuts the phone down):
+ * The sensors: Peridot has three TSENS blocks (dt: tsens@c228000 with its readings at 0xc222000, 14
+ * sensors; tsens@c229000 at 0xc223000, 16 sensors; tsens@c22a000 at 0xc224000, 5 sensors). Which
+ * sensor is where, and the limits, come from the phone's own device tree (its thermal-zones: the
+ * "-step" zones are where Xiaomi's kernel starts to slow the cores, the "-usr" zones where it shuts
+ * the phone down):
  *
- *   tsens0  0 aoss-0      1..4 cpu-0-0..3 (the small cores)     5, 6 cpuss-0, cpuss-1 (shared)
- *           7..12 cpu-1-0..5 (the big cores, two sensors each)  13, 14 cpu-1-6, cpu-1-7 (the prime core)
- *   tsens1  0 aoss-1      1, 2 gpuss-0, gpuss-1     3, 4 nspss    5 video    6 ddr    7..10 mdmss
- *           11 camera-0
+ *   tsens0  0 aoss-0      1, 2 cpuss-0, cpuss-1 (shared)
+ *           3..10 cpu-1-0-0..cpu-1-3-1 (the four big cores, two sensors each)
+ *           11..13 cpu-2-0-0..cpu-2-0-2 (the prime core)
+ *   tsens1  0 aoss-1      1..3 cpu-0-0-0..cpu-0-2-0 (the three small cores)
+ *           4..7 nsphvx-0/1, nsphmx-0/1     8..11 gpuss-0..3
+ *           12 video     13 ddr     14, 15 camera-0, camera-1
+ *   tsens2  0 aoss-2      1..4 mdmss-0..3
+ *
+ * The CPU zones follow the hardware's frequency groups: cpu-0-* is the small group (domain 0),
+ * cpu-1-* the big group (domain 1), cpu-2-* the prime core (domain 2); cpuss-* are shared by all.
  *
  * Xiaomi's limits are 108..112 C to start slowing the cores and 115 C to shut down. Ours are lower on
  * purpose: this kernel runs every core it uses at the top of its frequency table all the time
@@ -66,22 +73,22 @@ static const struct thermal_zone hakios_thermal_zones[] = {
 	{ "aoss-0", 0, 0, THERMAL_NO_CPU, 1000, 1150 },
 	{ "cpuss-0", 0, 1, THERMAL_ALL_CPUS, 950, 1150 },
 	{ "cpuss-1", 0, 2, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-0-0", 0, 3, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-0-1", 0, 4, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-1-0", 0, 5, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-1-1", 0, 6, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-2-0", 0, 7, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-2-1", 0, 8, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-3-0", 0, 9, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-1-3-1", 0, 10, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-2-0-0", 0, 11, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-2-0-1", 0, 12, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-2-0-2", 0, 13, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-1-0-0", 0, 3, 1, 950, 1150 },
+	{ "cpu-1-0-1", 0, 4, 1, 950, 1150 },
+	{ "cpu-1-1-0", 0, 5, 1, 950, 1150 },
+	{ "cpu-1-1-1", 0, 6, 1, 950, 1150 },
+	{ "cpu-1-2-0", 0, 7, 1, 950, 1150 },
+	{ "cpu-1-2-1", 0, 8, 1, 950, 1150 },
+	{ "cpu-1-3-0", 0, 9, 1, 950, 1150 },
+	{ "cpu-1-3-1", 0, 10, 1, 950, 1150 },
+	{ "cpu-2-0-0", 0, 11, 2, 950, 1150 },
+	{ "cpu-2-0-1", 0, 12, 2, 950, 1150 },
+	{ "cpu-2-0-2", 0, 13, 2, 950, 1150 },
 	/* Peridot TSENS1: CPU, neural, GPU, video, memory and camera zones. */
 	{ "aoss-1", 1, 0, THERMAL_NO_CPU, 1000, 1150 },
-	{ "cpu-0-0-0", 1, 1, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-0-1-0", 1, 2, THERMAL_ALL_CPUS, 950, 1150 },
-	{ "cpu-0-2-0", 1, 3, THERMAL_ALL_CPUS, 950, 1150 },
+	{ "cpu-0-0-0", 1, 1, 0, 950, 1150 },
+	{ "cpu-0-1-0", 1, 2, 0, 950, 1150 },
+	{ "cpu-0-2-0", 1, 3, 0, 950, 1150 },
 	{ "nsphvx-0", 1, 4, THERMAL_NO_CPU, 1000, 1150 },
 	{ "nsphvx-1", 1, 5, THERMAL_NO_CPU, 1000, 1150 },
 	{ "nsphmx-0", 1, 6, THERMAL_NO_CPU, 1000, 1150 },

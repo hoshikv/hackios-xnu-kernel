@@ -7,7 +7,7 @@ slow it down. The thermal service is the governor that Android's thermal engine 
 
 | What | How |
 |---|---|
-| Sensors | all 27 TSENS sensors of the SoC, every 250 ms (cores, GPU, DSPs, memory, modem area, camera, video) |
+| Sensors | all 35 TSENS sensors of the SoC, every 250 ms (three blocks: 14 + 16 + 5; cores, GPU, DSPs, memory, modem area, camera, video) |
 | Limits | from the phone's own device tree; slowing starts at 95 C (cores, GPU, modem area) or 100 C (the rest), lower than Xiaomi's 108..112 C because nothing else governs here |
 | Slowing | one row of the frequency table a tick, three when 5 C past the limit; heat outside the cores slows every group |
 | Speeding up | one row a second, only after a second of being 5 C under the limit (no see-saw) |
@@ -17,8 +17,8 @@ slow it down. The thermal service is the governor that Android's thermal engine 
 | iOS | `thermald` posts the level as `com.apple.system.thermalpressurelevel`, so `ProcessInfo.thermalState` changes in apps |
 
 ```sh
-sysctl kern.hackios.thermal            # the table: every sensor, every group of cores
-sysctl kern.hackios.thermal_pressure   # 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping
+sysctl kern.hakios.thermal            # the table: every sensor, every group of cores
+sysctl kern.hakios.thermal_pressure   # 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping
 thermald show                          # the same table, from the userland
 ```
 
@@ -27,10 +27,11 @@ Boot arguments: on by default with `cpufreq=1`; `thermal=0` off; `thermal=2` wat
 The governor's decisions are tested on the computer in 11 scenarios (`tools/thermal-test/run.sh`, in CI): heat-up,
 cool-down without see-saw, a single hot group, package heat, near-critical, a one-tick spike, a sustained emergency,
 silent sensors, a hot battery, a configuration with one group of cores. The kernel builds with it and boots in QEMU
-(where it stays off: QEMU has no TSENS). **On the phone** (POCO X5 Pro, 22 October 2026, `cpufreq=1 cpus=8`, the
-cores at 1.8 / 2.4 / 2.4 GHz, one core kept busy for a minute and a half): all 27 sensors answered, 33..38 C, pressure
-nominal, nothing slowed -- as it should be at that heat. The governor has not yet been seen slowing the cores on the
-phone itself: that needs a load that heats it past 95 C.
+(where it stays off: QEMU has no TSENS). The redwood bring-up (POCO X5 Pro, 22 October 2026, `cpufreq=1 cpus=8`, the
+cores at 1.8 / 2.4 / 2.4 GHz, one core kept busy for a minute and a half) had all 27 of its sensors answer at 33..38 C,
+pressure nominal, nothing slowed. Peridot's 35-sensor table is taken from its device tree and the host tests pass, but
+it has not yet been exercised on the phone; the governor slowing the cores still needs a load that heats them past
+95 C.
 
 ## Sensors (accelerometer, gyroscope, compass, light, proximity, barometer)
 

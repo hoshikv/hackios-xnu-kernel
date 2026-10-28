@@ -33,8 +33,8 @@
  * sensors -- TSENS is never written, its own thresholds stay as the firmware set them.
  *
  * The sensors' register layout: Linux drivers/thermal/qcom/tsens-v2.c (as bsd/dev/hakios.adreno.c
- * already reads the GPU's two): a status word per sensor at 0xa0 + 4 n, the last reading in its low 12
- * bits, signed, in tenths of a degree, bit 21 set when the reading is valid.
+ * already reads the GPU's four): a status word per sensor at 0xa0 + 4 n, the last reading in its low
+ * 12 bits, signed, in tenths of a degree, bit 21 set when the reading is valid.
  */
 #include <kern/clock.h>
 #include <kern/locks.h>
@@ -52,9 +52,9 @@
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern void loader_log_putc(char c);
 
-#define TSENS0_TM               hakios_board_addr("tsens0", 0x0c263000UL)    /* dt: tsens@c222000, "tsens_tm_physical" */
-#define TSENS1_TM               hakios_board_addr("tsens1", 0x0c265000UL)    /* dt: tsens@c223000 */
-#define TSENS2_TM               hakios_board_addr("tsens2", 0x0c267000UL)    /* Peridot dt: tsens@c22a000 */
+#define TSENS0_TM               hakios_board_addr("tsens0", 0x0c263000UL)    /* default: redwood; Peridot profile: 0xc222000 */
+#define TSENS1_TM               hakios_board_addr("tsens1", 0x0c265000UL)    /* default: redwood; Peridot profile: 0xc223000 */
+#define TSENS2_TM               hakios_board_addr("tsens2", 0x0c224000UL)    /* Peridot dt: tsens@c22a000 (redwood has no third block) */
 #define TSENS_TM_SIZE           0x1000UL
 #define TSENS_STATUS(sensor)    (0xa0 + 4 * (sensor))
 #define TSENS_VALID             (1u << 21)
@@ -249,9 +249,9 @@ hakios_thermal_init(void)
 	for (int z = 0; z < THERMAL_ZONES; z++) {
 		readings[z] = read_sensor(hakios_thermal_zones[z].block, hakios_thermal_zones[z].sensor);
 	}
-	/* one reading of the prime core's sensor to the log: whether TSENS answers at all is the first thing to know */
-	tell("thermal: %d sensors; CPU sensor %s C; caps %s; every %d ms\n", THERMAL_ZONES,
-	    tenths_text(readings[3], a, sizeof(a)), thermal_caps_on ? "on" : "off (thermal=2: watching only)", THERMAL_TICK_MS);
+	/* one reading of the prime core's sensor (cpu-2-0-2) to the log: whether TSENS answers at all is the first thing to know */
+	tell("thermal: %d sensors; prime sensor %s C; caps %s; every %d ms\n", THERMAL_ZONES,
+	    tenths_text(readings[13], a, sizeof(a)), thermal_caps_on ? "on" : "off (thermal=2: watching only)", THERMAL_TICK_MS);
 	if (kernel_thread_start(thermal_thread, NULL, &thread) != KERN_SUCCESS) {
 		tell("thermal: no thread: the cores are NOT watched\n");
 		return;
