@@ -1046,7 +1046,8 @@ step_survey(void)
 
 #define MPSS_MEMORY_DEFAULT     0x8b800000u   /* dt: reserved-memory mpss@..., memory-region of qcom,mss */
 static uint32_t mpss_memory = MPSS_MEMORY_DEFAULT;
-#define MPSS_MEMORY_SIZE        0x0f600000u
+#define MPSS_MEMORY_SIZE_DEFAULT 0x0f600000u
+static uint32_t mpss_memory_size = MPSS_MEMORY_SIZE_DEFAULT;
 #define PAS_MPSS_DEFAULT        4               /* dt: qcom,pas-id of qcom,mss */
 static uint32_t pas_mpss = PAS_MPSS_DEFAULT;
 
@@ -1077,7 +1078,7 @@ root_file(const char *name, uint64_t *size)
 	VATTR_INIT(&attributes);
 	VATTR_WANTED(&attributes, va_data_size);
 	if (vnode_getattr(vnode, &attributes, context) != 0 || attributes.va_data_size == 0 ||
-	    attributes.va_data_size > MPSS_MEMORY_SIZE) {
+	    attributes.va_data_size > mpss_memory_size) {
 		vnode_put(vnode);
 		return NULL;
 	}
@@ -1205,7 +1206,7 @@ step_firmware(void)
 			continue;
 		}
 		if (segment.paddr < mpss_memory || segment.file_size > segment.memory_size ||
-		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)mpss_memory + MPSS_MEMORY_SIZE) {
+		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)mpss_memory + mpss_memory_size) {
 			printf("mpss: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
 			    segment.memory_size);
 			goto fail;
@@ -1243,7 +1244,7 @@ step_firmware(void)
 	image.size = ((highest + 0xfff) & ~0xfffu) - mpss_memory;
 	printf("mpss: %u: the image is whole (%s): a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
 	    "bytes of the DSP's %#x from %#x\n", step, from_root ? "from /fw on the root" : "from the small image", size, hashes,
-	    image.segments, files, image.size, MPSS_MEMORY_SIZE, mpss_memory);
+	    image.segments, files, image.size, mpss_memory_size, mpss_memory);
 	announce("read the modem's four file systems from the phone's storage into memory of ours (rmtfs below)");
 	{
 		unsigned loaded = rmtfs_load();
@@ -1506,13 +1507,14 @@ step_header(void)
 	printf("mpss: %u: TRUSTZONE ACCEPTS THE MODEM'S SIGNATURE FROM THIS KERNEL\n", step);
 
 	announce("tell TrustZone where the image will be: the whole of the modem's memory, as Linux does");
-	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_mpss, mpss_memory, MPSS_MEMORY_SIZE, 0, &answer);
+	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_mpss, mpss_memory,
+	    mpss_memory_size, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
 	}
-	printf("mpss: %u: TrustZone takes the place: %#x bytes at %#x (the image takes %#x of them)\n", step, MPSS_MEMORY_SIZE, mpss_memory,
-	    image.size);
+	printf("mpss: %u: TrustZone takes the place: %#x bytes at %#x (the image takes %#x of them)\n", step,
+	    mpss_memory_size, mpss_memory, image.size);
 	return true;
 }
 
@@ -6329,14 +6331,17 @@ soc_override(void)
 	PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
 	PE_parse_boot_argn("soc_cmd_db", &cmd_db_phys, sizeof(cmd_db_phys));
 	PE_parse_boot_argn("soc_mpss_mem", &mpss_memory, sizeof(mpss_memory));
+	PE_parse_boot_argn("soc_mpss_size", &mpss_memory_size, sizeof(mpss_memory_size));
 	PE_parse_boot_argn("soc_imem", &ipa_imem, sizeof(ipa_imem));
 	PE_parse_boot_argn("soc_ipa_stream", &ipa_stream, sizeof(ipa_stream));
 	PE_parse_boot_argn("soc_ipa_stream_uc", &ipa_stream_uc, sizeof(ipa_stream_uc));
 	PE_parse_boot_argn("soc_pas_mpss", &pas_mpss, sizeof(pas_mpss));
 	PE_parse_boot_argn("soc_pas_ipa", &pas_ipa, sizeof(pas_ipa));
-	if (said != 0 || smem_phys != SMEM_PHYS_DEFAULT || mpss_memory != MPSS_MEMORY_DEFAULT) {
+	if (said != 0 || smem_phys != SMEM_PHYS_DEFAULT || mpss_memory != MPSS_MEMORY_DEFAULT ||
+	    mpss_memory_size != MPSS_MEMORY_SIZE_DEFAULT) {
 		printf("mpss: SoC addresses from boot-args: %u register blocks; shared memory %#x, command DB %#x, the modem's "
-		    "memory %#x, the SoC's internal memory %#x\n", said, smem_phys, cmd_db_phys, mpss_memory, ipa_imem);
+		    "memory %#x (%#x bytes), the SoC's internal memory %#x\n", said, smem_phys, cmd_db_phys, mpss_memory,
+		    mpss_memory_size, ipa_imem);
 	}
 }
 
