@@ -985,9 +985,9 @@ show_rpmh_resource(const char *name, const char *what)
  * dt: rsc@18200000 (qcom,rpmh-rsc), the application processor's sequencer for requests to RPMh;
  * of its three sets of registers ("DRV") the operating system's is the third (qcom,drv-id 2).
  * Requests wait in "TCS"s of up to 16 commands, a command being an address of RPMh's and a
- * value: by the device tree two TCSs for requests made at once, then three for what is to
- * hold while the processor sleeps and three for when it wakes. What the slots hold now is what
- * was last put there by whoever ran here before us: the boot loader.
+ * value. The number of TCSs and what each is for are board-specific (dt: qcom,tcs-config;
+ * Peridot has three active, two sleep, two wake and one fast path), so only what the slots
+ * hold now is shown: what was last put there by whoever ran here before us, the boot loader.
  */
 static struct block rsc = { "rsc", 0x18220000, 0x10000 };
 #define RSC_ID                  0x000           /* [23:16] the major version: the layout below is that of versions before 3 */
@@ -1001,7 +1001,6 @@ static struct block rsc = { "rsc", 0x18220000, 0x10000 };
 static bool
 step_rpmh(void)
 {
-	static const char *const kinds[] = { "at once", "at once", "asleep", "asleep", "asleep", "awake", "awake", "awake" };
 	char cx[16], xo[16], rfa[16];
 	uint32_t id, config, count, commands;
 
@@ -1034,7 +1033,7 @@ step_rpmh(void)
 	for (uint32_t t = 0; t < count && t < 8; t++) {
 		uint32_t enabled = rd(rsc.base + RSC_TCS(t) + TCS_ENABLED);
 
-		printf("wifi: %u: TCS %u (%s): commands enabled %#x, control %#x, status %#x\n", step, t, kinds[t], enabled,
+		printf("wifi: %u: TCS %u: commands enabled %#x, control %#x, status %#x\n", step, t, enabled,
 		    rd(rsc.base + RSC_TCS(t) + TCS_CONTROL), rd(rsc.base + RSC_TCS(t) + TCS_STATUS));
 		for (uint32_t c = 0; c < commands && c < 16; c++) {
 			uint32_t flags = rd(rsc.base + RSC_TCS(t) + TCS_COMMAND(c));
