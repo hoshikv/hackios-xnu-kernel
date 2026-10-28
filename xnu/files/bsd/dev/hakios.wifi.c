@@ -1225,10 +1225,9 @@ step_rails(void)
 /* ---- step 5: pins -------------------------------------------------------------------------------------- */
 
 /*
- * dt: pinctrl@f000000 (pin n's registers: 0x1000 * n above 0xf100000). Pin 84 is described there
- * as the radio's enable ("cnss_wlan_en": output, high when active), but no node uses the
- * description; Bluetooth's node calls the same pin "wl-reset" and has 85 as its own reset and 86
- * as its "sw-ctrl".
+ * dt: pinctrl@f000000 (pin n's registers: 0x1000 * n above 0xf100000). On Peridot the radio's
+ * enable/reset is gpio35 ("wl-reset"), Bluetooth's sw-ctrl is gpio80 and its reset is gpio156;
+ * the board profile supplies all three, so the redwood defaults (84, 86, 85) are only fallbacks.
  *
  * (The DSP's clocks -- three in the global clock controller have its name: gcc-sc7280.c,
  * gcc_wpss_ahb_clk at 0x9d154 and two more -- are not looked at: a read there is answered with
@@ -3535,12 +3534,12 @@ step_qrtr(void)
 
 /*
  * What the radio reads and writes in memory by itself (its copy engines, the rings of the data
- * path) goes through the application processors' SMMU as stream 0x1c00, with the mask 1 (dt:
- * "iommus" of qcom,wcn6750; the SMMU is apps-smmu@15000000, an Arm MMU-500 like the GPU's).
- * Whether the boot chain leaves that stream passing untranslated, translated or faulting decides
- * what has to be made before the radio is given an address. This reads the SMMU's global
- * registers -- the ones the hypervisor answers for, see hakios.adreno.c -- and says which of
- * its stream match registers cover that stream. Nothing is written.
+ * path) goes through the application processors' SMMU as stream 0x1400 on Peridot (0x1c00 on
+ * redwood), with the mask 1 (dt: "iommus" of qcom,wcn6750; the SMMU is apps-smmu@15000000, an
+ * Arm MMU-500 like the GPU's). Whether the boot chain leaves that stream passing untranslated,
+ * translated or faulting decides what has to be made before the radio is given an address. This
+ * reads the SMMU's global registers -- the ones the hypervisor answers for, see hakios.adreno.c --
+ * and says which of its stream match registers cover that stream. Nothing is written.
  */
 static struct block apps_smmu = { "apps smmu", 0x15000000, 0x2000 };
 #define SMMU_SCR0               0x000           /* bit 0: the whole SMMU off; bit 10: a stream nobody matches faults; bit 3:
@@ -3549,7 +3548,7 @@ static struct block apps_smmu = { "apps smmu", 0x15000000, 0x2000 };
 #define SMMU_IDR1               0x024           /* bit 31: 64K pages, [30:28] log2(pages)-1, [7:0] translation contexts */
 #define SMMU_SMR(n)             (0x800 + 4 * (n))       /* bit 31 valid, [30:16] mask, [14:0] stream */
 #define SMMU_S2CR(n)            (0xc00 + 4 * (n))       /* [17:16] 0 translate 1 bypass 2 fault, [7:0] context */
-#define RADIO_STREAM            0x1c00
+#define RADIO_STREAM            hakios_board_number("wifi_stream", 0x1c00)
 #define RADIO_STREAM_MASK       0x0001
 
 static void
