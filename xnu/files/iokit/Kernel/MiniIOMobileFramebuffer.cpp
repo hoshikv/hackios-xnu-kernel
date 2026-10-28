@@ -5,7 +5,7 @@
  * The display is the framebuffer the boot loader left us (the one the kernel's text console
  * draws on). There is no hardware behind it that we drive: a "swap" copies the pixels of the
  * surfaces of its layers into that memory, and "vsync" is a timer -- or, on the phone with
- * fb_scan=1, the panel's own scan (bsd/dev/hk_display.c): then each frame is copied where
+ * fb_scan=1, the panel's own scan (bsd/dev/hakios.display.c): then each frame is copied where
  * the scan lets it land whole in one refresh (no tearing), the rate is the panel's (120 Hz), and
  * the refresh notifications come when the panel's frames begin.
  *
@@ -24,9 +24,6 @@
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSBoolean.h>
-#include <libkern/c++/OSString.h>
-#include <libkern/c++/OSSymbol.h>
-#include <libkern/c++/OSCollectionIterator.h>
 #include <kern/thread_call.h>
 #include <kern/thread.h>
 #include <kern/clock.h>
@@ -43,17 +40,17 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
 
 #include "MiniIOSurface.h"
 
-extern "C" void hk_tl(const char * format, ...) __printflike(1, 2);
-/* the panel's scan (bsd/dev/hk_display.c; sys/hk_display.h, which iokit/ does not see) */
-struct hk_display_scan {
+extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
+/* the panel's scan (bsd/dev/hakios.display.c; sys/hakios.display.h, which iokit/ does not see) */
+struct hakios_display_scan {
 	int ok;
 	uint32_t lines, shown, millihz;
 	uint64_t line_ns, frame_ns;
 };
-extern "C" int hk_display_scan_start(void);
-extern "C" const struct hk_display_scan * hk_display_scan(void);
-extern "C" int hk_display_wait_lines(uint32_t first, uint32_t last, uint64_t limit_ns);
-extern "C" uint64_t hk_display_next_frame_ns(void);
+extern "C" int hakios_display_scan_start(void);
+extern "C" const struct hakios_display_scan * hakios_display_scan(void);
+extern "C" int hakios_display_wait_lines(uint32_t first, uint32_t last, uint64_t limit_ns);
+extern "C" uint64_t hakios_display_next_frame_ns(void);
 
 /* IOConnectCallMethod selectors of the framebuffer user client (iOS 16.5) */
 enum {
@@ -186,7 +183,7 @@ swapQueue(void)
  * Boot-arg touch_lat=1: a line for every swap handed over ("tl: s ID at US") and for every frame
  * put on the panel ("tl: v ID ready US shown US done US": the GPU done with it, its beat come, the
  * pixels in the panel's memory), in microseconds of mach_absolute_time, for measuring how long a
- * touch takes to show (tools/latency.py; the touch's own lines: bsd/dev/hk_input.c).
+ * touch takes to show (tools/latency.py; the touch's own lines: bsd/dev/hakios.input.c).
  */
 static TUNABLE(uint32_t, gTouchLat, "touch_lat", 0);
 
@@ -498,11 +495,11 @@ IOMobileFramebuffer::start(IOService * provider)
 
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	/* for who draws with the GPU (userland/src/eagl.c): a frame need not be waited for before it is handed over */
-	setProperty("HKWaitsForGPU", kOSBooleanTrue);
+	setProperty("HakiosWaitsForGPU", kOSBooleanTrue);
 	/* the panel's scan, if it can be read: its rate is then the one published, unless fb_hz= is given */
-	if (hk_display_scan_start()) {
+	if (hakios_display_scan_start()) {
 		uint32_t hz;
-		const struct hk_display_scan * scan = hk_display_scan();
+		const struct hakios_display_scan * scan = hakios_display_scan();
 
 		if (!PE_parse_boot_argn("fb_hz", &hz, sizeof(hz)) && scan != NULL) {
 			gScanHz = (scan->millihz + 500) / 1000;
@@ -901,7 +898,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 	nanoseconds_to_absolutetime(FRAME_PAUSE * NSEC_PER_MSEC, &pause);
 	clock_interval_to_deadline(SWAP_HELD_MS, kMillisecondScale, &deadline);
 	if (gTouchLat) {
-		hk_tl("tl: s %u at %llu\n", swapWord(swap, SWAP_ID), micros(now));
+		hakios_tl("tl: s %u at %llu\n", swapWord(swap, SWAP_ID), micros(now));
 	}
 	IOLockLock(fSwapLock);
 	fStatSwapsLate += fSwapTime != 0 && now - fSwapTime > period && now - fSwapTime < pause;
@@ -976,7 +973,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	fStatWaiting += mach_absolute_time() - began;
 	began = ready = mach_absolute_time();
-	if (hk_display_scan() != NULL) {
+	if (hakios_display_scan() != NULL) {
 		/*
 		 * Where the copy may start (fb_scan): every band of rows (fThreads of them, drawn side by side, each top
 		 * to bottom in about fDrawNs) has to stay behind the scan in this refresh -- written after the scan has
@@ -986,7 +983,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		 *   from  max(shown (n-1)/n, shown - D/line) and   up to  lines + shown/n - D/line.
 		 * Waited for, a frame and a half at most: a frame is never held longer than that for it.
 		 */
-		const struct hk_display_scan * scan = hk_display_scan();
+		const struct hakios_display_scan * scan = hakios_display_scan();
 		uint64_t d = fDrawNs != 0 ? fDrawNs : scan->frame_ns / 3, dl = d / scan->line_ns;
 		uint32_t n = fThreads != 0 ? fThreads : 1, S = scan->shown, T = scan->lines;
 		uint64_t lo = (uint64_t) S * (n - 1) / n, hi = (uint64_t) T + S / n;
@@ -1002,7 +999,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			hi = T;
 		}
 		fStatScanWaits++;
-		if (!hk_display_wait_lines((uint32_t) lo, (uint32_t) hi, scan->frame_ns * 3 / 2)) {
+		if (!hakios_display_wait_lines((uint32_t) lo, (uint32_t) hi, scan->frame_ns * 3 / 2)) {
 			fStatScanMissed++;
 		}
 		fBeat = began = mach_absolute_time();
@@ -1111,7 +1108,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	fSwapsShown++;
 	if (gTouchLat) {
-		hk_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
+		hakios_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));
 	}
 	if (layers != fLayersShown) {
@@ -1306,11 +1303,11 @@ IOMobileFramebufferUserClient::armVSync(void)
 
 	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
 	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
-	if (hk_display_scan() != NULL) {
+	if (hakios_display_scan() != NULL) {
 		/* fb_scan: when the panel's next frame begins, by its scan -- locked to it, never drifting */
 		uint64_t ahead;
 
-		nanoseconds_to_absolutetime(hk_display_next_frame_ns(), &ahead);
+		nanoseconds_to_absolutetime(hakios_display_next_frame_ns(), &ahead);
 		fVSyncTime = now + (ahead != 0 ? ahead : period);
 		thread_call_enter_delayed(fVSyncCall, fVSyncTime);
 		return;
@@ -1432,7 +1429,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 
 	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
 		if (gTouchLat) {
-			hk_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
+			hakios_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
 			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
 		}
 		return kIOReturnSuccess;
@@ -1554,136 +1551,22 @@ publishDisplayNode(void)
  * service of this class to appear before it looks for a GPU at all (once per process). An
  * accelerator without the properties that name its Metal and OpenGL ES drivers is passed
  * over by both, which leaves CoreAnimation with its software renderer, as before.
- *
- * With boot-arg metal=1 a user process may put those two properties here, which is the whole
- * of what keeps Metal from finding our driver; see setProperties below, and docs/metal.md 10.31
- * (10.14 for the measurement that made it a boot-arg).
  */
-
-/* Metal's step 2 reads exactly these two, in this order, off this service (docs/metal.md 1). */
-#define kAcceleratorPluginNameKey      "MetalPluginName"
-#define kAcceleratorPluginClassNameKey "MetalPluginClassName"
-
-static bool gAcceleratorTakesProperties;        /* boot-arg metal=1 */
-
 class IOAcceleratorES : public IOService
 {
 	OSDeclareDefaultStructors(IOAcceleratorES);
-
-public:
-	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
 };
 
 OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
-
-/*
- * Switch Metal's own device discovery on, from user space: IORegistryEntrySetCFProperties() with
- * MetalPluginName and MetalPluginClassName. Metal reads the first (getMetalPluginClassForService,
- * 0x181a39ba4), builds "/System/Library/Extensions/" + it + ".bundle", opens that with NSBundle
- * and takes the class the second names; with the first missing it returns nil before it even
- * reads the second, and that single `cbz` is where the chain breaks on this port today.
- *
- * This method is the only thing that was in the way. IORegistryEntry::setProperties is
- * "return kIOReturnUnsupported" (IORegistryEntry.cpp) and IOService does not override it; the
- * MAC check in front of the call has no policy to ask, because this kernel registers no iokit
- * hook (bsd/kern/kern_minimac.c); and this service carries no property whitelist.
- *
- * Why it is gated on a boot-arg, which is a measured risk and not caution in general
- * (docs/metal.md 10.14): the conditions Metal puts on a device object are asserts, not soft
- * refusals (10.2-10.3). A process that asks Metal and is handed a half-made device does not
- * degrade to another renderer -- it aborts ("Assertion failed: ([self
- * conformsToProtocol:@protocol(MTLDeviceSPI)])", "failed assertion _limits.maxColorAttachments
- * > 0"), and an aborting daemon is restarted by launchd, which is a loop. Published instead at
- * registerService() time, the properties would exist before launchd, backboardd and SpringBoard
- * are born, so each of the three would take the Metal road on its first call, with nobody left
- * to read the log. Behind a boot-arg, a machine that has them is a machine booted on purpose to
- * have them, and the first such boot is meant to be RC=rc.ios, where launchd is never born.
- *
- * An empty string removes a property rather than setting it. That is the way out of the loop
- * above without a reboot: the properties live only in the registry, so processes started after
- * they are gone go back to the software road.
- *
- * Everything else is refused, and refused whole, before anything is set: every process on the
- * machine can reach this method and the only thing it exists for is this one switch.
- */
-IOReturn
-IOAcceleratorES::setProperties(OSObject * properties)
-{
-	OSDictionary * dict = OSDynamicCast(OSDictionary, properties);
-	OSCollectionIterator * keys;
-	OSObject * next;
-	char who[32] = "?";
-
-	if (!gAcceleratorTakesProperties) {
-		static unsigned said;
-
-		if (said++ < 4) {
-			proc_selfname(who, sizeof(who));
-			IOLog("IOAcceleratorES: %s asks to set properties on it; boot-arg metal=1 was not given\n", who);
-		}
-		return kIOReturnUnsupported;
-	}
-	if (dict == NULL || dict->getCount() == 0) {
-		return kIOReturnBadArgument;
-	}
-	keys = OSCollectionIterator::withCollection(dict);
-	if (keys == NULL) {
-		return kIOReturnNoMemory;
-	}
-	proc_selfname(who, sizeof(who));
-	while ((next = keys->getNextObject()) != NULL) {
-		const OSSymbol * key = OSDynamicCast(OSSymbol, next);
-
-		if (key == NULL || (!key->isEqualTo(kAcceleratorPluginNameKey) &&
-		    !key->isEqualTo(kAcceleratorPluginClassNameKey))) {
-			IOLog("IOAcceleratorES: refusing what %s sent: only " kAcceleratorPluginNameKey " and "
-			    kAcceleratorPluginClassNameKey " are taken here\n", who);
-			keys->release();
-			return kIOReturnUnsupported;
-		}
-		if (OSDynamicCast(OSString, dict->getObject(key)) == NULL) {
-			IOLog("IOAcceleratorES: refusing \"%s\" from %s: Metal reads it as a CFString\n",
-			    key->getCStringNoCopy(), who);
-			keys->release();
-			return kIOReturnBadArgument;
-		}
-	}
-	keys->reset();
-	while ((next = keys->getNextObject()) != NULL) {
-		const OSSymbol * key = OSDynamicCast(OSSymbol, next);
-		OSString * value = OSDynamicCast(OSString, dict->getObject(key));
-
-		if (value->getLength() == 0) {
-			removeProperty(key);
-			IOLog("IOAcceleratorES: %s removed by %s\n", key->getCStringNoCopy(), who);
-		} else if (setProperty(key, value)) {
-			IOLog("IOAcceleratorES: %s = %s, set by %s\n", key->getCStringNoCopy(),
-			    value->getCStringNoCopy(), who);
-		} else {
-			IOLog("IOAcceleratorES: %s could not be set\n", key->getCStringNoCopy());
-			keys->release();
-			return kIOReturnNoMemory;
-		}
-	}
-	keys->release();
-	return kIOReturnSuccess;
-}
 
 static void
 publishAccelerator(IOService * provider)
 {
 	IOAcceleratorES * accelerator = OSTypeAlloc(IOAcceleratorES);
-	uint32_t metal = 0;
 
-	gAcceleratorTakesProperties = PE_parse_boot_argn("metal", &metal, sizeof(metal)) && metal != 0;
 	if (accelerator != NULL && accelerator->init() && accelerator->attach(provider)) {
 		accelerator->setName("sgx");
 		accelerator->registerService();
-		/* the first line to look for in the log of such a boot: the gate is open, nothing is set yet */
-		if (gAcceleratorTakesProperties) {
-			IOLog("IOAcceleratorES: metal=%u: this service takes " kAcceleratorPluginNameKey
-			    " and " kAcceleratorPluginClassNameKey " from user space\n", metal);
-		}
 	}
 	OSSafeReleaseNULL(accelerator);
 }

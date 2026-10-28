@@ -1,6 +1,6 @@
 # Thermal service and sensors
 
-## Thermal service (kernel: `bsd/dev/hk_thermal.c`, userland: `thermald`)
+## Thermal service (kernel: `bsd/dev/hakios.thermal.c`, userland: `thermald`)
 
 With `cpufreq=1` every core this kernel uses runs at the top of its frequency table, and nothing else would ever
 slow it down. The thermal service is the governor that Android's thermal engine would otherwise be:
@@ -39,7 +39,7 @@ framework (Qualcomm's "SEE"), reached through the QMI service 400 over QRTR. Wha
 
 | Step | State |
 |---|---|
-| the DSP started, GLINK, QRTR hello, the DSP's services listed | done (`adsp=1`, `bsd/dev/hk_adsp.c`) |
+| the DSP started, GLINK, QRTR hello, the DSP's services listed | done (`adsp=1`, `bsd/dev/hakios.adsp.c`) |
 | which services it offers and which it looks for on our side | `sysctl kern.hackios.adsp_services` (new) |
 | QRTR ports of our own on the DSP's channel (for any QMI client) | to do |
 | the service locator and notifier the DSP looks for (its sensor domain waits for them) | to do |

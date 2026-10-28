@@ -44,20 +44,22 @@ extern void gic_v3_irq_cpu_shutdown(void);
 
 void loader_log_putc(char c);
 void loader_return(void);
-extern void hk_adreno_quiesce(void);
-extern void hk_adreno_stop(void);
-extern void hk_adreno_minute(void);
-extern void hk_wifi_stop(void);
-extern void hk_wifi_quiesce(void);
-extern void hk_adsp_stop(void);
-extern void hk_adsp_quiesce(void);
-extern void hk_ddr_quiesce(void);
-extern void hk_haptic_quiesce(void);
-extern void hk_torch_quiesce(void);
-extern void hk_camera_quiesce(void);
-extern void hk_mic_quiesce(void);
-extern void hk_ufs_quiesce(void);
-extern void hk_var_save_on_return(void);   /* bsd/dev/hk_ufs.c: the data volume into the flash */
+extern void hakios_adreno_quiesce(void);
+extern void hakios_adreno_stop(void);
+extern void hakios_adreno_minute(void);
+extern void hakios_wifi_stop(void);
+extern void hakios_wifi_quiesce(void);
+extern void hakios_adsp_stop(void);
+extern void hakios_adsp_quiesce(void);
+extern void hakios_mpss_stop(void);
+extern void hakios_mpss_quiesce(void);
+extern void hakios_ddr_quiesce(void);
+extern void hakios_haptic_quiesce(void);
+extern void hakios_torch_quiesce(void);
+extern void hakios_camera_quiesce(void);
+extern void hakios_mic_quiesce(void);
+extern void hakios_ufs_quiesce(void);
+extern void hakios_var_save_on_return(void);   /* bsd/dev/hakios.ufs.c: the data volume into the flash */
 void loader_checkpoint(uint64_t n);
 
 /* Also referenced from the early exception vector in start.s. */
@@ -205,7 +207,7 @@ struct loader_live {
  * loader to hand to the host once the kernel is back. { physical address, bytes, kernel address }.
  */
 uint64_t loader_recording[3];
-/* ... and of the sound (/dev/hk-audio makes one with boot-arg rec_sound). */
+/* ... and of the sound (/dev/hakios-audio makes one with boot-arg rec_sound). */
 uint64_t loader_sound[3];
 
 struct loader_live loader_live = {
@@ -369,15 +371,16 @@ loader_return(void)
 	 */
 	psci_smp_stop_others();
 #endif
-	hk_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
-	hk_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
-	hk_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
-	hk_adsp_quiesce();         /* nor the audio DSP */
-	hk_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
-	hk_haptic_quiesce();       /* the vibration motor's chip back into reset, if it was let out */
-	hk_torch_quiesce();        /* the flashlight off, if it was lit */
-	hk_camera_quiesce();       /* the camera powered down, if it was powered up */
-	hk_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
+	hakios_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
+	hakios_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
+	hakios_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
+	hakios_adsp_quiesce();         /* nor the audio DSP */
+	hakios_mpss_quiesce();         /* nor the modem */
+	hakios_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
+	hakios_haptic_quiesce();       /* the vibration motor's chip back into reset, if it was let out */
+	hakios_torch_quiesce();        /* the flashlight off, if it was lit */
+	hakios_camera_quiesce();       /* the camera powered down, if it was powered up */
+	hakios_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
 	/*
 	 * A panic's text is first collected in the panic buffer and only later
 	 * flushed to the console; if the console itself is what failed, that
@@ -436,10 +439,11 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
 	}
 	PE_parse_boot_argn("return_panic", &as_panic, sizeof(as_panic));
 	if (!as_panic) {
-		hk_var_save_on_return();   /* the data volume kept, while the system is still whole */
-		hk_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
-		hk_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
-		hk_adsp_stop();            /* and the audio DSP */
+		hakios_var_save_on_return();   /* the data volume kept, while the system is still whole */
+		hakios_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
+		hakios_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
+		hakios_adsp_stop();            /* and the audio DSP */
+		hakios_mpss_stop();            /* and the modem */
 	}
 	if (PE_parse_boot_argn("return_cpu", &cpu, sizeof(cpu)) && cpu <= (uint32_t)ml_get_max_cpu_number() &&
 	    cpu_xcall((int)cpu, loader_return_test, (void *)(uintptr_t)(as_panic ? 2 : 1)) == KERN_SUCCESS) {
@@ -482,10 +486,10 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
 		for (const char *c = banner; *c; c++) {
 			loader_log_putc(*c);
 		}
-		hk_var_save_on_return();
-		hk_adreno_stop();
-		hk_wifi_stop();
-		hk_adsp_stop();
+		hakios_var_save_on_return();
+		hakios_adreno_stop();
+		hakios_wifi_stop();
+		hakios_adsp_stop();
 		loader_return();
 	}
 	clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);
@@ -527,11 +531,11 @@ extern void MiniIOSurfaceUsage(uint32_t *count, uint64_t *bytes);
  * daemons, and once none is left and it is below the second, whatever is next in line -- the
  * window server included.
  */
-void hk_memory_line(char *buf, size_t len);
+void hakios_memory_line(char *buf, size_t len);
 
-/* The line itself (also kern.hk_memory, for a job list to keep: bsd/miscfs/apfs/apfs_vfsops.c) */
+/* The line itself (also kern.hakios_memory, for a job list to keep: bsd/miscfs/apfs/apfs_vfsops.c) */
 void
-hk_memory_line(char *buf, size_t len)
+hakios_memory_line(char *buf, size_t len)
 {
 #define MB(pages)       ((unsigned int)(((uint64_t)(pages) * PAGE_SIZE) >> 20))
 	uint32_t surfaces = 0;
@@ -554,9 +558,9 @@ memory_report(void)
 {
 	char line[256];
 
-	hk_memory_line(line, sizeof(line));
+	hakios_memory_line(line, sizeof(line));
 	printf("%s", line);
-	hk_adreno_minute();                /* (and how warm the GPU is, if it is in use) */
+	hakios_adreno_minute();                /* (and how warm the GPU is, if it is in use) */
 }
 
 /* Every HV_WDT_PET_SECONDS: feed the watchdog if there is one, and show any watching loader a sign of life. */
