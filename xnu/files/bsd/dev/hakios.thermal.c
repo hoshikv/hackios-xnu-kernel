@@ -68,7 +68,7 @@ static bool thermal_caps_on;                    /* cpufreq raised a group: there
 /* what the sysctls show, kept by the service's thread and read by anyone */
 static LCK_GRP_DECLARE(thermal_lck_grp, "hakios-thermal");
 static LCK_MTX_DECLARE(thermal_mtx, &thermal_lck_grp);
-static char thermal_text[6144];
+static char thermal_text[12288];
 static int thermal_pressure, thermal_hottest = THERMAL_INVALID, thermal_throttles, thermal_running;
 
 SYSCTL_DECL(_kern_hakios);
@@ -125,12 +125,23 @@ tenths_text(int t, char *buf, size_t size)
 	return buf;
 }
 
+static const char *
+thermal_source_name(uint8_t source)
+{
+	static const char *const names[] = { "tsens", "adc", "pmic", "qmi", "bcl", "soc" };
+
+	return source < sizeof(names) / sizeof(names[0]) ? names[source] : "?";
+}
+
 /* one sensor's reading, THERMAL_INVALID if it has none after a few tries */
 static int16_t
-read_sensor(unsigned block, unsigned sensor)
+read_sensor(const struct thermal_zone *zone)
 {
+	if (zone->source != THERMAL_SOURCE_TSENS) {
+		return THERMAL_INVALID;
+	}
 	for (int i = 0; i < TSENS_TRIES; i++) {
-		uint32_t status = *(volatile uint32_t *)(tsens[block] + TSENS_STATUS(sensor));
+		uint32_t status = *(volatile uint32_t *)(tsens[zone->block] + TSENS_STATUS(zone->sensor));
 
 		if (status & TSENS_VALID) {
 			return (int16_t)((int32_t)(status << 20) >> 20);
@@ -163,10 +174,23 @@ write_text(int battery)
 	}
 	for (int z = 0; z < THERMAL_ZONES && n < sizeof(text); z++) {
 		const struct thermal_zone *zone = &hakios_thermal_zones[z];
+		char source[24];
 
-		n += snprintf(text + n, sizeof(text) - n, "%-9s tsens%u/%-2u %6s C   limit %s, stop %s\n", zone->name, zone->block,
-		    zone->sensor, tenths_text(readings[z], a, sizeof(a)), tenths_text(zone->passive, b, sizeof(b)),
-		    tenths_text(zone->critical, c, sizeof(c)));
+		if (zone->source == THERMAL_SOURCE_TSENS) {
+			snprintf(source, sizeof(source), "tsens%u/%u", (unsigned)zone->block, (unsigned)zone->sensor);
+		} else if (zone->source == THERMAL_SOURCE_PMIC || zone->source == THERMAL_SOURCE_SOC) {
+			snprintf(source, sizeof(source), "%s", thermal_source_name(zone->source));
+		} else {
+			snprintf(source, sizeof(source), "%s/%#x", thermal_source_name(zone->source), (unsigned)zone->sensor);
+		}
+		if (thermal_source_is_temperature(zone->source)) {
+			n += snprintf(text + n, sizeof(text) - n, "%-18s %-10s %6s C   limit %s, stop %s\n", zone->name, source,
+			    tenths_text(readings[z], a, sizeof(a)), tenths_text(zone->passive, b, sizeof(b)),
+			    tenths_text(zone->critical, c, sizeof(c)));
+		} else {
+			n += snprintf(text + n, sizeof(text) - n, "%-18s %-10s %6s     raw\n", zone->name, source,
+			    tenths_text(readings[z], a, sizeof(a)));
+		}
 	}
 	lck_mtx_lock(&thermal_mtx);
 	memcpy(thermal_text, text, sizeof(thermal_text));
@@ -190,7 +214,7 @@ thermal_thread(__unused void *arg, __unused wait_result_t wr)
 
 		battery = battery <= -273 ? -2730 : battery * 10;
 		for (int z = 0; z < THERMAL_ZONES; z++) {
-			readings[z] = read_sensor(hakios_thermal_zones[z].block, hakios_thermal_zones[z].sensor);
+			readings[z] = read_sensor(&hakios_thermal_zones[z]);
 		}
 		flags = thermal_gov_step(&gov, readings, battery);
 
@@ -228,7 +252,7 @@ void
 hakios_thermal_init(void)
 {
 	uint32_t mode = 1;
-	int top[THERMAL_DOMAINS], raised = 0;
+	int top[THERMAL_DOMAINS], raised = 0, tsens_zones = 0;
 	thread_t thread;
 	char a[16];
 
@@ -247,10 +271,13 @@ hakios_thermal_init(void)
 	tsens[2] = ml_io_map(TSENS2_TM, TSENS_TM_SIZE);
 	thermal_gov_init(&gov, top);
 	for (int z = 0; z < THERMAL_ZONES; z++) {
-		readings[z] = read_sensor(hakios_thermal_zones[z].block, hakios_thermal_zones[z].sensor);
+		if (hakios_thermal_zones[z].source == THERMAL_SOURCE_TSENS) {
+			tsens_zones++;
+		}
+		readings[z] = read_sensor(&hakios_thermal_zones[z]);
 	}
 	/* one reading of the prime core's sensor (cpu-2-0-2) to the log: whether TSENS answers at all is the first thing to know */
-	tell("thermal: %d sensors; prime sensor %s C; caps %s; every %d ms\n", THERMAL_ZONES,
+	tell("thermal: %d zones (%d TSENS); prime sensor %s C; caps %s; every %d ms\n", THERMAL_ZONES, tsens_zones,
 	    tenths_text(readings[13], a, sizeof(a)), thermal_caps_on ? "on" : "off (thermal=2: watching only)", THERMAL_TICK_MS);
 	if (kernel_thread_start(thermal_thread, NULL, &thread) != KERN_SUCCESS) {
 		tell("thermal: no thread: the cores are NOT watched\n");
