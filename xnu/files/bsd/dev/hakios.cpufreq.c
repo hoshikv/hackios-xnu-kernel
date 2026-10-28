@@ -1,6 +1,6 @@
 /*
- * The clock speed of the processor cores the kernel runs on, on the POCO X5 Pro (redwood).
- * Only with boot-arg cpufreq=1: the addresses are this phone's.
+ * The clock speed of the processor cores the kernel runs on. Only with boot-arg cpufreq=1: the
+ * EPSS address is the board profile's (Peridot: 0x17d91000; the default is redwood's).
  *
  * The boot loader leaves each group of cores at a modest frequency and expects the operating
  * system to ask for more. On this SoC that is one register write: the hardware ("EPSS") has
@@ -78,13 +78,24 @@ loop_speed(void)
 	return nanos ? (uint32_t)(2000000ULL * 1000 / nanos) : 0;
 }
 
-/* The group of the core with that number in its MPIDR (the device tree's "reg": the number is the second field). */
+/*
+ * The group of the core with that number in its MPIDR (the device tree's "reg": the number is the
+ * second field). The small cores are the profile's bitmask (Peridot: 0x07, cores 0..2; redwood:
+ * 0x0f, cores 0..3), the prime core is the profile's number (both: 7), and every other core is in
+ * the big group. Redwood's old 4+3+1 is only the default.
+ */
+static uint32_t small_cores = 0x0f;
+static uint32_t prime_core = 7;
+
 static uint32_t
 domain_of(uint32_t phys_id)
 {
 	uint32_t core = (phys_id >> 8) & 0xff;
 
-	return core < 4 ? 0 : core < 7 ? 1 : 2;
+	if (core < 32 && (small_cores & (1u << core)) != 0) {
+		return 0;
+	}
+	return core == prime_core ? 2 : 1;
 }
 
 /* each group's registers and the highest row of its table, once raised: for the thermal service's caps */
@@ -618,6 +629,9 @@ hakios_cpufreq_init(void)
 	if (!PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
+	small_cores = hakios_board_number("small_cores", small_cores);
+	prime_core = hakios_board_number("prime_core", prime_core);
+	tell("cpufreq: small-core mask %#x, prime core %u\n", small_cores, prime_core);
 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 		cores[domain_of(topology->cpus[i].phys_id)]++;
 	}
