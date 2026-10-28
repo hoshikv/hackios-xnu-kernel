@@ -65,7 +65,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 44274016a4cf..58602c53045d 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,44 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,45 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -95,6 +95,7 @@ index 44274016a4cf..58602c53045d 100644
 +bsd/dev/hakios.camera.c	standard
 +bsd/dev/hakios.mic.c		standard
 +bsd/dev/hakios.wifi.c		standard
++bsd/dev/hakios.bt.c		standard
 +bsd/dev/hakios.adsp.c		standard
 +bsd/dev/hakios.mpss.c		standard
 +bsd/dev/hakios.image.c		standard
@@ -1738,7 +1739,7 @@ diff --git a/iokit/conf/files b/iokit/conf/files
 index 5fb0a52062e0..c07be8d9e0b0 100644
 --- a/iokit/conf/files
 +++ b/iokit/conf/files
-@@ -79,6 +79,14 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
+@@ -79,6 +79,15 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
  iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
  
  iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
@@ -1747,6 +1748,7 @@ index 5fb0a52062e0..c07be8d9e0b0 100644
 +iokit/Kernel/MiniIOMobileFramebuffer.cpp		optional iokitcpp
 +iokit/Kernel/hakios.gpu.cpp				optional iokitcpp
 +iokit/Kernel/hakios.wlan.cpp			optional iokitcpp
++iokit/Kernel/hakios.bluetooth.cpp		optional iokitcpp
 +iokit/Kernel/hakios.battery.cpp			optional iokitcpp
 +iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
 +iokit/Kernel/MiniIONetworkStack.cpp			optional iokitcpp

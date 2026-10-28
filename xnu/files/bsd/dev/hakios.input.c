@@ -11,6 +11,7 @@
 #include <sys/proc.h>
 #include <sys/hakios.input.h>
 #include <sys/hakios.board.h>
+#include <sys/hakios.bluetooth.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <pexpert/pexpert.h>
@@ -231,6 +232,7 @@ hakios_input_init(void)
 	hakios_net_init();
 	hakios_adreno_init();
 	hakios_wifi_init();
+	hakios_bt_init();
 	hakios_adsp_init();
 	hakios_mpss_init();
 }
