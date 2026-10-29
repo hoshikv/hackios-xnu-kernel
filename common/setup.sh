@@ -1,61 +1,67 @@
 #!/bin/bash
 # One-time setup of a HackiOS workspace.
 #
-# HackiOS lives in two repositories that are built as one tree:
+# HackiOS userland now lives in the combined upstream repository:
 #
-#   hackios-xnu-kernel     (this one)  the XNU kernel patches, the EFI loader, the UEFI port, Wi-Fi,
-#                                      QEMU scripts, xl and these common scripts
-#   hackios-xnu-userland               our init, injected libraries, launchd jobs, the image builder,
-#                                      the scripts that take iOS out of Apple's IPSW, Metal/Mesa work
+#   hackios-xnu-kernel (this one)  kernel patches, loader, UEFI, Wi-Fi, QEMU scripts, xl, common
+#   upstream/main                  userland/ (init, injected libraries, launchd jobs, image builder)
 #
-# Their scripts refer to each other by path (userland/build.sh uses the kernel's cross toolchain in
-# xnu-deps/, the kernel's APFS code is tested with tools/apfs/...). So the userland repository is
-# checked out into the SAME directory as this one, as a second git repository whose git dir is
-# .userland.git. Every path is then exactly where every script expects it; each repository still
-# commits and pushes on its own (use common/ugit for the userland one: `common/ugit status`).
+# The old separate hackios-xnu-userland checkout is no longer maintained. If .userland.git is
+# already present, setup keeps updating it; otherwise it extracts upstream/main's userland/ and
+# applies the Peridot Bluetooth patch. Every path is then where the scripts expect it.
 #
-# usage: common/setup.sh            clone hackios-xnu-userland into this tree (or update it) and
-#                                   check the host for the tools the build needs
-#   USERLAND_URL=...   where to clone from (default: github.com/oosexgang/hackios-xnu-userland)
-#   USERLAND_REF=...   branch or tag (default: metal; set main for non-Metal work)
+# usage: common/setup.sh            set up userland/ and check the host for the tools the build needs
+#   USERLAND_URL=...   use the old separate repository instead (default: none)
+#   USERLAND_REF=...   branch or tag in that repository (default: metal)
 set -e
 cd "$(dirname "$(readlink -f "$0")")/.."
 ROOT=$PWD
 URL=${USERLAND_URL:-https://github.com/oosexgang/hackios-xnu-userland.git}
 REF=${USERLAND_REF:-metal}
 UG=(git --git-dir="$ROOT/.userland.git" --work-tree="$ROOT")
+UPSTREAM=0
 
-if [ ! -d .userland.git ]; then
-	echo "setup: cloning $URL ($REF) into this tree"
-	tmp=$(mktemp -d)
-	git clone --no-checkout --branch "$REF" "$URL" "$tmp/u"
-	mv "$tmp/u/.git" .userland.git
-	rm -rf "$tmp"
-	"${UG[@]}" config core.bare false
-	"${UG[@]}" config core.worktree "$ROOT"
-	# the kernel's .gitignore is read here too and outranks info/exclude: untracked files are the
-	# kernel repository's business; add a new userland file by name (common/ugit add PATH)
-	"${UG[@]}" config status.showUntrackedFiles no
-	cp common/userland.exclude .userland.git/info/exclude
-	# README.md, .gitignore and LICENSE at the top are the kernel repository's: the userland ones stay in git
-	# only (skip-worktree), every other file is written out
-	"${UG[@]}" read-tree -m HEAD
-	for f in README.md .gitignore LICENSE; do
-		"${UG[@]}" ls-files --error-unmatch "$f" > /dev/null 2>&1 && "${UG[@]}" update-index --skip-worktree "$f"
-	done
-	"${UG[@]}" ls-files -z | grep -zvxE 'README\.md|\.gitignore|LICENSE' | xargs -0 "${UG[@]}" checkout --
-else
-	echo "setup: hackios-xnu-userland already here, updating"
-	cp common/userland.exclude .userland.git/info/exclude
-	# This kernel branch needs the matching Metal userland. Switch only when Git can do so
-	# without overwriting local edits; a failed switch leaves the current checkout untouched.
-	if "${UG[@]}" checkout "$REF"; then
-		"${UG[@]}" pull --ff-only || echo "setup: could not fast-forward the userland checkout (local changes?)"
-	else
-		echo "setup: could not switch userland to $REF (local changes or missing ref?)"
-	fi
+if [ ! -d .userland.git ] && [ -z "${USERLAND_URL+x}" ] && [ -z "${USERLAND_REF+x}" ]; then
+	echo "setup: using the combined upstream/main userland"
+	common/use-upstream-userland.sh
+	UPSTREAM=1
 fi
-"${UG[@]}" log -1 --format='setup: hackios-xnu-userland at %h (%cs) %s'
+
+if [ "$UPSTREAM" = 0 ]; then
+	if [ ! -d .userland.git ]; then
+		echo "setup: cloning $URL ($REF) into this tree"
+		tmp=$(mktemp -d)
+		git clone --no-checkout --branch "$REF" "$URL" "$tmp/u"
+		mv "$tmp/u/.git" .userland.git
+		rm -rf "$tmp"
+		"${UG[@]}" config core.bare false
+		"${UG[@]}" config core.worktree "$ROOT"
+		# the kernel's .gitignore is read here too and outranks info/exclude: untracked files are the
+		# kernel repository's business; add a new userland file by name (common/ugit add PATH)
+		"${UG[@]}" config status.showUntrackedFiles no
+		cp common/userland.exclude .userland.git/info/exclude
+		# README.md, .gitignore and LICENSE at the top are the kernel repository's: the userland ones stay in git
+		# only (skip-worktree), every other file is written out
+		"${UG[@]}" read-tree -m HEAD
+		for f in README.md .gitignore LICENSE; do
+			"${UG[@]}" ls-files --error-unmatch "$f" > /dev/null 2>&1 && "${UG[@]}" update-index --skip-worktree "$f"
+		done
+		"${UG[@]}" ls-files -z | grep -zvxE 'README\.md|\.gitignore|LICENSE' | xargs -0 "${UG[@]}" checkout --
+	else
+		echo "setup: hackios-xnu-userland already here, updating"
+		cp common/userland.exclude .userland.git/info/exclude
+		# This kernel branch needs the matching Metal userland. Switch only when Git can do so
+		# without overwriting local edits; a failed switch leaves the current checkout untouched.
+		if "${UG[@]}" checkout "$REF"; then
+			"${UG[@]}" pull --ff-only || echo "setup: could not fast-forward the userland checkout (local changes?)"
+		else
+			echo "setup: could not switch userland to $REF (local changes or missing ref?)"
+		fi
+	fi
+	"${UG[@]}" log -1 --format='setup: hackios-xnu-userland at %h (%cs) %s'
+else
+	echo "setup: userland from upstream/main $(git rev-parse --short upstream/main) + Peridot Bluetooth patch"
+fi
 git log -1 --format='setup: hackios-xnu-kernel   at %h (%cs) %s'
 
 # host check: what is missing only matters for the step that needs it
