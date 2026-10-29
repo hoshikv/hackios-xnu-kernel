@@ -1,0 +1,381 @@
+diff --git a/userland/build.sh b/userland/build.sh
+index 94b77c9..e88a9a7 100755
+--- a/userland/build.sh
++++ b/userland/build.sh
+@@ -11,6 +11,7 @@
+ #                      JOBS="..."   labels of the stock iOS launchd jobs to load (default: IOS_JOBS)
+ #                      REST=1       ... and the rest of them, started only when asked for (see mkjobs.py)
+ #                      WIFID=0      without wifid, iOS's Wi-Fi daemon, which is in by default (see below)
++#                      BLUETOOTH=1  ... and iOS's Bluetooth daemon with our H4 bridge; needs bt=1 in XNU
+ #                      OSLOG="..."  labels of the jobs whose os_log output goes to the console ("all": every
+ #                                   one of JOBS; default: only the window server, which says little)
+ #                      INJECT="..." the programs started with a library of ours, "LIBRARY NAME..." per line
+@@ -118,6 +119,9 @@ IOS_JOBS=${JOBS-"
+ # (Count a QEMU run log with its duplicate lines removed: run-ios.sh prints launchd's log twice.)
+ # WIFID=0 leaves it out.
+ [ "${WIFID-1}" != 0 ] && IOS_JOBS="$IOS_JOBS com.apple.wifid"
++# Bluetooth needs both the daemon and BlueTool; the kernel has already downloaded the firmware and
++# published the H4 endpoint (bsd/dev/hakios.bt.c, bt=1), so BlueTool only has to answer its boot contract.
++[ "${BLUETOOTH-0}" = 1 ] && IOS_JOBS="$IOS_JOBS com.apple.bluetoothd com.apple.BlueTool"
+ # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
+ # (src/inject.c is libhakios.dylib, src/inject_sb.c is libhakios.sb.dylib, src/inject_media.c is
+ # libhakios.media.dylib).
+@@ -132,6 +136,8 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
+ /redwood/lib/libhakios.media.dylib mediaserverd
+ /redwood/lib/libhakios.app.dylib Sileo
+ /redwood/lib/libhakios.tweaks.dylib Preferences"}
++[ "${BLUETOOTH-0}" = 1 ] && INJECT="$INJECT
++/redwood/lib/libhakios.bluetooth.dylib bluetoothd"
+ # STOREFRONT=1: and a library of ours inside appstored as well (src/inject_store.c). It is not in the
+ # list above because it changes what the daemon believes: AMS's account is made to answer with the
+ # storefront Apple's bag server returned for this device, which is how the App Store is asked whether
+@@ -143,6 +149,10 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
+ mkdir -p obj
+ 
+ if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
++if [ "${BLUETOOTH-0}" = 1 ] && [ -n "$PREBUILT" ]; then
++	echo "build.sh: BLUETOOTH=1 needs the cross toolchain (theos + iPhoneOS16.5.sdk)" >&2
++	exit 1
++fi
+ if [ -n "$PREBUILT" ]; then
+ 	echo "build.sh: not compiling, using the programs in prebuilt/userland"
+ 	for f in ../prebuilt/userland/*; do
+@@ -187,6 +197,10 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+ 	if [ -z "$PREBUILT" ]; then
+ 		# ordinary dynamically linked programs of our own, built against the iOS SDK
+ 		$DYN -o obj/hello_dyn src/hello_dyn.c
++		if [ "${BLUETOOTH-0}" = 1 ]; then
++			$DYN -fblocks -framework CoreFoundation -framework IOKit -o obj/hakios_bluetool src/hakios_bluetool.c
++			$DYN -dynamiclib -install_name /redwood/lib/libhakios.bluetooth.dylib -framework CoreFoundation -framework IOKit -o obj/libhakios.bluetooth.dylib src/inject_bluetooth.c
++		fi
+ 		$DYN -framework CoreFoundation -o obj/svc_test src/svc_test.c
+ 		$DYN -Wno-four-char-constants -framework CoreFoundation -framework IOSurface -o obj/surf_test src/surf_test.c
+ 		$DYN -o obj/rwtouch src/rwtouch.c
+@@ -280,6 +294,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+ 		fi
+ 	fi
+ 	cp obj/hello_dyn obj/svc_test obj/surf_test obj/rwtouch obj/mg_test root/bin/
++	[ "${BLUETOOTH-0}" = 1 ] && cp obj/hakios_bluetool root/bin/
+ 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
+ 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
+ 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
+@@ -305,6 +320,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+ 	mkdir -p root/dev root/private/var
+ 	mkdir -p root/lib
+ 	cp obj/libhakios.dylib obj/libhakios.sb.dylib root/lib/
++	[ "${BLUETOOTH-0}" = 1 ] && cp obj/libhakios.bluetooth.dylib root/lib/
+ 	[ -f obj/libhakios.media.dylib ] && cp obj/libhakios.media.dylib root/lib/     # (as with cpu_test)
+ 	[ -f obj/libhakios.store.dylib ] && cp obj/libhakios.store.dylib root/lib/
+ 	[ -f obj/libhakios.fairplay.dylib ] && cp obj/libhakios.fairplay.dylib root/lib/
+@@ -411,6 +427,14 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
+ 	# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
+ 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
+ fi
++# ... and the Bluetooth patch and NVM, from the phone's /vendor/bt_firmware/image into ../fw-bt
++# (bsd/dev/hakios.bt.c reads them from fw/ before the iOS root is mounted; bt=1)
++if [ -d ../fw-bt ]; then
++	mkdir -p root/fw
++	for f in msbtfw12.mbn msbtfw12.tlv msnv12.bin; do
++		[ -f "../fw-bt/$f" ] && install -m 0644 "../fw-bt/$f" root/fw/
++	done
++fi
+ # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
+ # (bsd/dev/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
+ if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
+@@ -448,7 +472,7 @@ fi
+ # git worktree add has none of it, and neither has one whose tools/new-workspace.sh predates the fw-*
+ # loop there. Say what went in and what was not there to go in; what each one is for is above.
+ fwhave= fwnone=
+-for d in gpu wifi haptic camera audio; do
++for d in gpu wifi bt haptic camera audio; do
+ 	if [ -d ../fw-$d ]; then fwhave="$fwhave $d"; else fwnone="$fwnone $d"; fi
+ done
+ echo "build.sh: fw/: $(ls -1 root/fw 2>/dev/null | wc -l) files from ../fw-*:${fwhave:- none present}${fwnone:+, absent:$fwnone}"
+diff --git a/userland/mkjobs.py b/userland/mkjobs.py
+index cc41251..9da73a3 100755
+--- a/userland/mkjobs.py
++++ b/userland/mkjobs.py
+@@ -271,6 +271,17 @@ for label in labels:
+     # a job that is named is wanted, whatever hardware it says it is for: wifid's asks for a node "wlan" in the
+     # device tree, which the loader's tree does not have yet
+     job.pop('_LimitLoadToDeviceTree', None)
++    if label == 'com.apple.bluetoothd' and os.environ.get('BLUETOOTH') == '1':
++        job.setdefault('EnvironmentVariables', {}).update(
++            BT_HCI_TRANSPORT='H4:POSIX:com.hakios.bluetooth,115200',
++            BT_BAUDRATE='115200')
++    if label == 'com.apple.BlueTool' and os.environ.get('BLUETOOTH') == '1':
++        job.pop('Program', None)
++        job['Label'] = 'com.hakios.bluetool'
++        for key in ('POSIXSpawnType', 'EnablePressuredExit', 'ThrottleInterval'):
++            job.pop(key, None)
++        job['ProcessType'] = 'Interactive'
++        job['ProgramArguments'] = ['/redwood/bin/hakios_bluetool']
+     if 'all' in oslog or label in oslog:
+         job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
+     with open(f'{dest}/{label}.plist', 'wb') as f:
+diff --git a/userland/src/hakios_bluetool.c b/userland/src/hakios_bluetool.c
+new file mode 100644
+index 0000000..f5cc02b
+--- /dev/null
++++ b/userland/src/hakios_bluetool.c
+@@ -0,0 +1,85 @@
++/* BlueTool's XPC boot contract for the already-bootstrapped Hakios QCA WCN6750.
++ * No Broadcom scripts are executed. Unsupported requests return an error. */
++#include <CoreFoundation/CoreFoundation.h>
++#include <IOKit/IOKitLib.h>
++#include <dispatch/dispatch.h>
++#include <sys/socket.h>
++#include <sys/ioctl.h>
++#include <errno.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++
++/* The public SDK omits XPC headers; these are the libxpc interfaces used here. */
++typedef void *xpc_object_t;
++typedef void *xpc_connection_t;
++extern const char _xpc_type_dictionary, _xpc_type_connection;
++extern const void *xpc_get_type(xpc_object_t);
++extern xpc_connection_t xpc_connection_create_mach_service(const char *,dispatch_queue_t,uint64_t);
++extern void xpc_connection_set_event_handler(xpc_connection_t,void (^)(xpc_object_t));
++extern void xpc_connection_resume(xpc_connection_t);
++extern void xpc_connection_send_message(xpc_connection_t,xpc_object_t);
++extern uid_t xpc_connection_get_euid(xpc_connection_t);
++extern xpc_object_t xpc_dictionary_create_reply(xpc_object_t);
++extern xpc_object_t xpc_dictionary_get_value(xpc_object_t,const char *);
++extern const char *xpc_dictionary_get_string(xpc_object_t,const char *);
++extern void xpc_dictionary_set_int64(xpc_object_t,const char *,int64_t);
++extern void xpc_release(xpc_object_t);
++/* Darwin kernel-control ABI; also omitted from the public iOS SDK. */
++struct bt_ctl_info { uint32_t ctl_id; char ctl_name[96]; };
++
++static int controller_ready(void)
++{
++    io_service_t service=IOServiceGetMatchingService(0,IOServiceNameMatching("bluetooth"));
++    if(!service) return ENODEV;
++    CFTypeRef ready=IORegistryEntryCreateCFProperty(service,CFSTR("HakiosBluetoothReady"),kCFAllocatorDefault,0);
++    IOObjectRelease(service);
++    bool running=ready==kCFBooleanTrue;
++    if(ready) CFRelease(ready);
++    if(!running) return EIO;
++    int fd=socket(PF_SYSTEM,SOCK_STREAM,2 /* SYSPROTO_CONTROL */);
++    if(fd<0) return errno;
++    struct bt_ctl_info info={0};
++    strlcpy(info.ctl_name,"com.hakios.bluetooth",sizeof(info.ctl_name));
++    int result=ioctl(fd,0xc0644e03UL /* CTLIOCGINFO */,&info)<0 ? errno : 0;
++    close(fd);
++    return result;
++}
++static void request(xpc_connection_t peer,xpc_object_t message)
++{
++    if(xpc_get_type(message)!=&_xpc_type_dictionary) return;
++    xpc_object_t reply=xpc_dictionary_create_reply(message);
++    if(!reply) return;
++    const char *command=xpc_dictionary_get_string(message,"kMsgId");
++    xpc_object_t arguments=xpc_dictionary_get_value(message,"kMsgArgs");
++    const char *script=arguments && xpc_get_type(arguments)==&_xpc_type_dictionary ?
++        xpc_dictionary_get_string(arguments,"script") : NULL;
++    int result=ENOTSUP;
++    /* Firmware and NVM initialization were both completed by XNU before launchd. */
++    if(command && script && !strcmp(command,"RunBuiltinScript") &&
++        (!strcmp(script,"boot") || !strcmp(script,"init")))
++        result=controller_ready();
++    fprintf(stderr,"Hakios BlueTool: command=%.48s script=%.48s result=%d\n",
++        command?command:"(missing)",script?script:"(missing)",result);
++    xpc_dictionary_set_int64(reply,"result",result);
++    xpc_connection_send_message(peer,reply);
++    xpc_release(reply);
++}
++int main(void)
++{
++    setbuf(stderr,NULL);
++    xpc_connection_t listener=xpc_connection_create_mach_service("com.apple.BlueTool",dispatch_get_main_queue(),1);
++    if(!listener) return 1;
++    xpc_connection_set_event_handler(listener,^(xpc_object_t object) {
++        if(xpc_get_type(object)!=&_xpc_type_connection) return;
++        xpc_connection_t peer=object;
++        uid_t uid=xpc_connection_get_euid(peer);
++        if(uid!=0 && uid!=501) return;
++        xpc_connection_set_event_handler(peer,^(xpc_object_t message) { request(peer,message); });
++        xpc_connection_resume(peer);
++    });
++    xpc_connection_resume(listener);
++    fprintf(stderr,"Hakios BlueTool: listening for the QCA bootstrap contract\n");
++    dispatch_main();
++}
+diff --git a/userland/src/inject_bluetooth.c b/userland/src/inject_bluetooth.c
+new file mode 100644
+index 0000000..4e0cca7
+--- /dev/null
++++ b/userland/src/inject_bluetooth.c
+@@ -0,0 +1,169 @@
++/* iOS 16.5 (20F66) H4 initialization compatibility for QCA WCN6750.
++ * Apple's init sequence treats the optional Write Default Erroneous Data
++ * Reporting command as mandatory. Skip that step only when the controller's
++ * actual Supported Commands mask says it is absent. No HCI reply is altered. */
++#include <CoreFoundation/CoreFoundation.h>
++#include <IOKit/IOKitLib.h>
++#include <mach/mach.h>
++#include <libkern/OSCacheControl.h>
++#include <mach-o/dyld.h>
++#include <mach-o/loader.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <signal.h>
++#include <sys/ucontext.h>
++
++static uintptr_t daemon_base;
++/* Async-signal-safe fault location: no unwinder, allocator, or device data. */
++static void report_fault(int signal_number,siginfo_t *info,void *opaque)
++{
++    ucontext_t *context=opaque;
++    uintptr_t values[4]={(uintptr_t)signal_number,(uintptr_t)info->si_addr,
++        context->uc_mcontext->__ss.__pc-daemon_base,
++        context->uc_mcontext->__ss.__lr-daemon_base};
++    char line[160]="Hakios Bluetooth fault: signal/address/pc-offset/lr-offset";
++    size_t length=strlen(line);
++    const char digits[]="0123456789abcdef";
++    for(unsigned i=0;i<4;i++) {
++        line[length++]=' ';
++        for(int shift=(int)sizeof(uintptr_t)*8-4;shift>=0;shift-=4)
++            line[length++]=digits[(values[i]>>shift)&15];
++    }
++    line[length++]='\n';
++    (void)write(STDERR_FILENO,line,length);
++    kill(getpid(),signal_number); /* SA_RESETHAND keeps the original fatal outcome. */
++}
++static void (*finish_init_step)(unsigned,const char *);
++static void skip_optional_error_reporting(void)
++{
++    fprintf(stderr,"Hakios Bluetooth: skipping unsupported optional error reporting\n");
++    finish_init_step(0,"Hakios optional erroneous-data reporting unavailable");
++}
++static unsigned (*send_hci)(unsigned,void (*)(unsigned),...);
++static unsigned char initial_random_address[6];
++static void initial_address_complete(unsigned status)
++{
++    fprintf(stderr,"Hakios Bluetooth: initial LE random address completion status=%u\n",status);
++    finish_init_step(status,"Hakios initial LE random address");
++}
++static void prepare_legacy_address(void)
++{
++    /* Native address formatting accepts the six-byte address in display order.
++     * Use a fresh static random address; never log its bytes. */
++    arc4random_buf(initial_random_address,sizeof(initial_random_address));
++    initial_random_address[0]=(initial_random_address[0]&0x3f)|0xc0;
++    fprintf(stderr,"Hakios Bluetooth: programming initial LE random address in legacy mode\n");
++    unsigned status=send_hci(0xa5,initial_address_complete,initial_random_address);
++    if(status) initial_address_complete(status);
++}
++__attribute__((constructor)) static void initialize(void)
++{
++    io_service_t service=IOServiceGetMatchingService(0,IOServiceNameMatching("bluetooth"));
++    if(!service) return;
++    CFTypeRef mask=IORegistryEntryCreateCFProperty(service,CFSTR("HakiosBluetoothSupportedCommands"),kCFAllocatorDefault,0);
++    IOObjectRelease(service);
++    if(!mask) return;
++    bool absent=CFGetTypeID(mask)==CFDataGetTypeID() && CFDataGetLength((CFDataRef)mask)==64 &&
++        !(CFDataGetBytePtr((CFDataRef)mask)[18]&0x08);
++    CFRelease(mask);
++    if(!absent) return;
++    const struct mach_header_64 *header=NULL;
++    for(uint32_t i=0;i<_dyld_image_count();i++) {
++        const struct mach_header *candidate=_dyld_get_image_header(i);
++        const char *name=_dyld_get_image_name(i);
++        if(candidate && candidate->filetype==MH_EXECUTE && name && !strcmp(name,"/usr/sbin/bluetoothd")) {
++            header=(const struct mach_header_64 *)candidate;
++            break;
++        }
++    }
++    const uint8_t expected_uuid[16]={0x96,0x39,0x30,0xf1,0xd5,0x65,0x32,0xb5,0x91,0xd6,0x43,0xaf,0x71,0xe2,0xc8,0x5a};
++    bool image_matches=false;
++    if(!header || header->magic!=MH_MAGIC_64 || header->ncmds>1024) return;
++    const uint8_t *commands=(const uint8_t *)(header+1),*end=commands+header->sizeofcmds;
++    for(unsigned i=0;i<header->ncmds;i++) {
++        if((size_t)(end-commands)<sizeof(struct load_command)) return;
++        const struct load_command *command=(const void *)commands;
++        if(command->cmdsize<sizeof(*command) || command->cmdsize>(size_t)(end-commands)) return;
++        if(command->cmd==LC_UUID && command->cmdsize>=sizeof(struct uuid_command))
++            {
++            image_matches=!memcmp(((const struct uuid_command *)command)->uuid,expected_uuid,sizeof(expected_uuid));
++        }
++        commands+=command->cmdsize;
++    }
++    if(!image_matches) { fprintf(stderr,"Hakios Bluetooth: unsupported daemon UUID; optional init unchanged\n"); return; }
++    uintptr_t base=(uintptr_t)header;
++    daemon_base=base;
++    struct sigaction fault_action={0};
++    fault_action.sa_sigaction=report_fault;
++    fault_action.sa_flags=SA_SIGINFO|SA_RESETHAND;
++    sigemptyset(&fault_action.sa_mask);
++    sigaction(SIGSEGV,&fault_action,NULL);
++    sigaction(SIGBUS,&fault_action,NULL);
++    /* The native feature initializer populates Broadcom/Apple VSC flags from
++     * Apple's model-derived chipset ranges. QCA implements neither range.
++     * Preserve its zeroing, identity and logging; skip both range bodies. */
++    uint32_t *bcm_range=(void *)(base+0x282ff4);
++    uint32_t *apple_range=(void *)(base+0x28311c);
++    if(*bcm_range!=0x51000689 || *apple_range!=0x511f4288) return;
++    vm_address_t first=(vm_address_t)bcm_range&~((vm_address_t)vm_page_size-1);
++    vm_address_t last=((vm_address_t)apple_range+vm_page_size)&~((vm_address_t)vm_page_size-1);
++    if(vm_protect(mach_task_self(),first,last-first,FALSE,VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY)!=KERN_SUCCESS) {
++        fprintf(stderr,"Hakios Bluetooth: cannot disable foreign vendor capabilities\n");
++        return;
++    }
++    *bcm_range=0x12800009; /* mov w9, #-1: outside Broadcom range */
++    *apple_range=0x12800008; /* mov w8, #-1: outside Apple range */
++    sys_icache_invalidate((void *)first,last-first);
++    if(vm_protect(mach_task_self(),first,last-first,FALSE,VM_PROT_READ|VM_PROT_EXECUTE)!=KERN_SUCCESS) {
++        fprintf(stderr,"Hakios Bluetooth: cannot restore feature initializer protection\n");
++        _exit(1);
++    }
++    fprintf(stderr,"Hakios Bluetooth: disabled Apple/Broadcom vendor capabilities\n");
++    /* Allow LE Set Random Address (ID 0xa5) while the native init state is
++     * active. It is now a real init step, completed by the controller. */
++    uint32_t *init_mask=(void *)(base+0x10c968);
++    if(*init_mask!=0xd28404e9) return;
++    vm_address_t init_page=(vm_address_t)init_mask&~((vm_address_t)vm_page_size-1);
++    if(vm_protect(mach_task_self(),init_page,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY)!=KERN_SUCCESS) return;
++    *init_mask=0xd28405e9;
++    sys_icache_invalidate((void *)init_page,vm_page_size);
++    if(vm_protect(mach_task_self(),init_page,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_EXECUTE)!=KERN_SUCCESS) _exit(1);
++
++    /* Native debug preferences select standard scanning, without synthesizing
++     * successful responses to Apple's multi-core/vendor scan commands. */
++    const void *low_keys[]={CFSTR("DisableLowPowerCoreScan")};
++    const void *vsc_keys[]={CFSTR("DisableVSCScanParams")};
++    const void *values[]={kCFBooleanTrue};
++    CFDictionaryRef low=CFDictionaryCreate(NULL,low_keys,values,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
++    CFDictionaryRef vsc=CFDictionaryCreate(NULL,vsc_keys,values,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
++    if(low && vsc) {
++        CFPreferencesSetAppValue(CFSTR("LowPowerCoreScan"),low,CFSTR("com.apple.MobileBluetooth.debug"));
++        CFPreferencesSetAppValue(CFSTR("VSCScanParams"),vsc,CFSTR("com.apple.MobileBluetooth.debug"));
++        fprintf(stderr,"Hakios Bluetooth: selected native standard scan preferences\n");
++    }
++    if(low) CFRelease(low);
++    if(vsc) CFRelease(vsc);
++    void (**step)(void)=(void *)(base+0x7fbde0);
++    const uint32_t *original=(const void *)(base+0x10b970);
++    const uint32_t *completion=(const void *)(base+0x1092d8);
++    if((uintptr_t)*step!=(uintptr_t)original || original[0]!=0xd100c3ff ||
++        original[1]!=0xa9014ff4 || completion[0]!=0xd10103ff || completion[1]!=0xa90157f6) {
++        fprintf(stderr,"Hakios Bluetooth: optional init ABI mismatch; unchanged\n"); return;
++    }
++    void (**periodic_step)(void)=(void *)(base+0x7fbdb0);
++    if((uintptr_t)*periodic_step!=base+0x10b3bc || *(uint32_t *)(base+0x10b3bc)!=0xd100c3ff) return;
++    vm_address_t page=(vm_address_t)step&~((vm_address_t)vm_page_size-1);
++    if(vm_protect(mach_task_self(),page,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY)!=KERN_SUCCESS) {
++        fprintf(stderr,"Hakios Bluetooth: cannot update private init table\n"); return;
++    }
++    finish_init_step=(void *)(base+0x1092d8);
++    *step=skip_optional_error_reporting;
++    send_hci=(void *)(base+0x10c8c4);
++    *periodic_step=prepare_legacy_address;
++    vm_protect(mach_task_self(),page,vm_page_size,FALSE,VM_PROT_READ);
++    fprintf(stderr,"Hakios Bluetooth: enabled QCA optional-command compatibility\n");
++}
