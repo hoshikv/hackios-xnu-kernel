@@ -59,6 +59,18 @@ bt_write(vm_offset_t base, uint32_t offset, uint32_t value)
 	__asm__ volatile("dsb osh" ::: "memory");
 }
 
+static inline uint32_t
+bt_read_addr(vm_offset_t address)
+{
+	return bt_read(address, 0);
+}
+
+static inline void
+bt_write_addr(vm_offset_t address, uint32_t value)
+{
+	bt_write(address, 0, value);
+}
+
 static void
 bt_sleep_us(uint32_t us)
 {
@@ -99,19 +111,19 @@ static unsigned wlan_reset_pin = 35;
 static void
 gpio_configure(unsigned pin, unsigned function, unsigned pull, unsigned ma, bool output)
 {
-	bt_write(GPIO_CFG(pin), pull | function << 2 | (ma / 2 - 1) << 6 | (output ? 1u << 9 : 0));
+	bt_write_addr(GPIO_CFG(pin), pull | function << 2 | (ma / 2 - 1) << 6 | (output ? 1u << 9 : 0));
 }
 
 static void
 gpio_set(unsigned pin, bool high)
 {
-	bt_write(GPIO_IO(pin), high ? 2 : 0);
+	bt_write_addr(GPIO_IO(pin), high ? 2 : 0);
 }
 
 static bool
 gpio_get(unsigned pin)
 {
-	return bt_read(GPIO_IO(pin)) & 1;
+	return bt_read_addr(GPIO_IO(pin)) & 1;
 }
 
 static void
@@ -214,13 +226,13 @@ static bool
 rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
 {
 	for (int i = 0; i < 2000; i++) {
-		if ((bt_read(TCS_COMMON(reg)) & mask) == value) {
+		if ((bt_read_addr(TCS_COMMON(reg)) & mask) == value) {
 			return true;
 		}
 		bt_sleep_us(100);
 	}
 	hakios_tl("bt: RPMh timeout waiting for %s (register %#x = %#x)\n", what, reg,
-	    bt_read(TCS_COMMON(reg)));
+	    bt_read_addr(TCS_COMMON(reg)));
 	return false;
 }
 
@@ -228,33 +240,33 @@ rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
 static bool
 rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 {
-	uint32_t irq_enable = bt_read(TCS_COMMON(TCS_IRQ_ENABLE));
+	uint32_t irq_enable = bt_read_addr(TCS_COMMON(TCS_IRQ_ENABLE));
 	uint32_t irq_bit = 1u << TCS_ID;
 	bool done;
 
-	bt_write(TCS(TCS_CMD_ENABLE), 0);
-	bt_write(TCS(TCS_WAIT_FOR_COMPLETION), 0);
-	bt_write(TCS(TCS_CONTROL), bt_read(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
-	bt_write(TCS(TCS_CONTROL), bt_read(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
-	bt_write(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
+	bt_write_addr(TCS(TCS_CMD_ENABLE), 0);
+	bt_write_addr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
+	bt_write_addr(TCS(TCS_CONTROL), bt_read_addr(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
+	bt_write_addr(TCS(TCS_CONTROL), bt_read_addr(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
+	bt_write_addr(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
 	for (unsigned i = 0; i < count; i++) {
-		bt_write(TCS(TCS_CMD_MSGID(i)), MSGID_WRITE_4_BYTES | MSGID_RESPONSE);
-		bt_write(TCS(TCS_CMD_ADDR(i)), address[i]);
-		bt_write(TCS(TCS_CMD_DATA(i)), data[i]);
+		bt_write_addr(TCS(TCS_CMD_MSGID(i)), MSGID_WRITE_4_BYTES | MSGID_RESPONSE);
+		bt_write_addr(TCS(TCS_CMD_ADDR(i)), address[i]);
+		bt_write_addr(TCS(TCS_CMD_DATA(i)), data[i]);
 	}
-	bt_write(TCS(TCS_WAIT_FOR_COMPLETION), (1u << count) - 1);
-	bt_write(TCS(TCS_CMD_ENABLE), (1u << count) - 1);
-	bt_write(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable | irq_bit);
-	bt_write(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE);
-	bt_write(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
+	bt_write_addr(TCS(TCS_WAIT_FOR_COMPLETION), (1u << count) - 1);
+	bt_write_addr(TCS(TCS_CMD_ENABLE), (1u << count) - 1);
+	bt_write_addr(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable | irq_bit);
+	bt_write_addr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE);
+	bt_write_addr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
 
 	done = rpmh_wait(TCS_IRQ_STATUS, irq_bit, irq_bit, "the request");
-	bt_write(TCS(TCS_CONTROL), bt_read(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
-	bt_write(TCS(TCS_CONTROL), bt_read(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
-	bt_write(TCS(TCS_CMD_ENABLE), 0);
-	bt_write(TCS(TCS_WAIT_FOR_COMPLETION), 0);
-	bt_write(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
-	bt_write(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable);
+	bt_write_addr(TCS(TCS_CONTROL), bt_read_addr(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
+	bt_write_addr(TCS(TCS_CONTROL), bt_read_addr(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
+	bt_write_addr(TCS(TCS_CMD_ENABLE), 0);
+	bt_write_addr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
+	bt_write_addr(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
+	bt_write_addr(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable);
 	return done;
 }
 
@@ -1313,8 +1325,8 @@ static void
 bt_save_board(void)
 {
 	for (unsigned i = 0; i < sizeof(bt_pins) / sizeof(bt_pins[0]); i++) {
-		bt_saved_pins[i] = bt_read(GPIO_CFG(bt_pins[i]));
-		bt_saved_pin_ios[i] = bt_read(GPIO_IO(bt_pins[i]));
+		bt_saved_pins[i] = bt_read_addr(GPIO_CFG(bt_pins[i]));
+		bt_saved_pin_ios[i] = bt_read_addr(GPIO_IO(bt_pins[i]));
 	}
 	bt_saved_gcc_vote = bt_read(gcc, GCC_QUPV3_WRAP1_S2_CBCR);
 	bt_saved_gcc_cfg = bt_read(gcc, GCC_QUPV3_WRAP1_QSPI_REF_CFG);
@@ -1346,8 +1358,8 @@ bt_restore(void)
 		}
 	}
 	for (unsigned i = 0; i < sizeof(bt_pins) / sizeof(bt_pins[0]); i++) {
-		bt_write(GPIO_IO(bt_pins[i]), bt_saved_pin_ios[i]);
-		bt_write(GPIO_CFG(bt_pins[i]), bt_saved_pins[i]);
+		bt_write_addr(GPIO_IO(bt_pins[i]), bt_saved_pin_ios[i]);
+		bt_write_addr(GPIO_CFG(bt_pins[i]), bt_saved_pins[i]);
 	}
 	bt_write(gcc, GCC_QUPV3_WRAP1_QSPI_REF_CFG, bt_saved_gcc_cfg);
 	bt_write(gcc, GCC_QUPV3_WRAP1_QSPI_REF_CMD, bt_saved_gcc_cmd | 1u);
