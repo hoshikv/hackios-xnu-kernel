@@ -33,4 +33,4 @@ else
 	git apply -p1 "$P"
 	echo "use-upstream-userland: userland/ from $REF $(git rev-parse --short "$REF"), Bluetooth patch applied"
 fi
-echo "next: common/build.sh peridot BLUETOOTH=1; boot XNU with bt=1"
+echo "next: common/build.sh peridot BLUETOOTH=1; BT=1 common/run.sh peridot"

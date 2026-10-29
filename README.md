@@ -35,7 +35,7 @@ that are only built and still need another device run.
 | Thermal | `thermal=1` enables the kernel frequency governor and `ddr=0` avoids a previously crashing DDR RPMh vote. The phone was reported to get very hot; effective thermal sensor feedback and throttling have not yet been confirmed. |
 | Volume and haptics | Volume up/down and vibration were reported not working. |
 | Wi-Fi and audio | Not confirmed working on Peridot; treat as unfinished. |
-| Bluetooth | The WCN6750 UART transport, firmware download, and upstream-userland bridge are implemented but not yet boot-tested. `bt=1` is in the Peridot profile; build the bridge with `BLUETOOTH=1`. |
+| Bluetooth | The WCN6750 UART transport, firmware download, and upstream-userland bridge are implemented but not yet boot-tested. Build the bridge with `BLUETOOTH=1`; `bt=1` is opt-in for testing (`BT=1 common/run.sh peridot`). |
 
 These results are specific to the Peridot port. Redwood screenshots, firmware names, and hardware claims do not describe this target.
 
@@ -107,6 +107,7 @@ line — and `fw-wifi/network` — network name and password. `userland/build.sh
 ```sh
 common/build.sh peridot GL=1         # Peridot images and boot artifacts
 common/build.sh peridot BLUETOOTH=1  # same, plus the Bluetooth bridge (needs the cross toolchain)
+BT=1 common/run.sh peridot           # boot with bt=1 for a Bluetooth test
 ```
 
 or step by step with `xl`:

@@ -10,6 +10,7 @@
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 load_device "$1"
 SECS=${2:-$DEFAULT_SECS}
+[ "${BT-0}" = 1 ] && BOOTARGS="$BOOTARGS bt=1"
 mkdir -p logs
 [ -f userland/root.apfs ] && [ -f userland/system.apfs ] || die "no images: run common/build.sh $DEVICE first"
 
