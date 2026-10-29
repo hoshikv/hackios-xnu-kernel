@@ -46,14 +46,29 @@ fi
 if ! skip images; then
 	have_userland
 	[ -d ios165/rootfs ] || die "no iOS files yet: run ios165/fetch.sh first (it downloads them from Apple to this machine)"
-	# The Peridot branch carries firmware packaging fixes until they are upstream: include the
-	# complete ADSP/WPSS segment sets, the ADSP DT image, and this board's QCA6750 data.
-	P=common/patches/userland-peridot-firmware.patch
+	# The Peridot branch carries firmware packaging and Bluetooth fixes until they are upstream.
+	# The old userland checkout and the combined upstream/main tree have different build.sh
+	# contexts, so apply whichever patch fits this tree.
+	P=
 	USERLAND_PATCH_APPLIED=0
-	if ! git apply --reverse --check "$P" >/dev/null 2>&1; then
-		git apply --check "$P" || die "cannot apply the Peridot ADSP-DTB userland patch"
-		git apply "$P"
-		USERLAND_PATCH_APPLIED=1
+	for patch in common/patches/userland-peridot-firmware.patch \
+	    common/patches/userland-peridot-bluetooth.patch; do
+		if git apply --reverse --check "$patch" >/dev/null 2>&1; then
+			P=$patch
+			break
+		fi
+	done
+	if [ -z "$P" ]; then
+		for patch in common/patches/userland-peridot-firmware.patch \
+		    common/patches/userland-peridot-bluetooth.patch; do
+			if git apply --check "$patch" >/dev/null 2>&1; then
+				git apply "$patch"
+				P=$patch
+				USERLAND_PATCH_APPLIED=1
+				break
+			fi
+		done
+		[ -n "$P" ] || die "cannot apply a Peridot userland patch"
 	fi
 	# Do not leave the separately versioned userland checkout dirty after its build, including
 	# when that build exits early.
