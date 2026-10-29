@@ -20,6 +20,7 @@
 !/uefi/
 !/prebuilt/
 !/wifi/
+!/metal/
 
 __pycache__/
 *~
@@ -39,6 +40,7 @@ __pycache__/
 /tools/jb-preinstall.py
 /tools/font_trim.py
 /tools/metallib.py
+/metal/out/
 
 /xnuloader/*
 !/xnuloader/build.sh

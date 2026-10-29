@@ -1,0 +1,6 @@
+# Run the hakios-metal core's probe on the real GPU (boot with gpu=1).
+# Built by metal/build.sh; put on the image with
+#   METAL=1 common/build.sh peridot
+/redwood/bin/sound_test springboard
+/redwood/bin/rwtouch wait 25
+/redwood/bin/hakios-metal-probe

@@ -13,6 +13,7 @@
 #   4. boot     mkxnuimg.py -> out/<device>-boot.img             -- phones: the UEFI image for `fastboot boot`
 #
 #   SKIP="kernel loader images boot"   leave steps out
+#   METAL=1                            build metal/ and put its GPU probe in the image
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 load_device "$1"; shift
 skip() { [[ " $SKIP " == *" $1 "* ]]; }
@@ -46,6 +47,12 @@ fi
 if ! skip images; then
 	have_userland
 	[ -d ios165/rootfs ] || die "no iOS files yet: run ios165/fetch.sh first (it downloads them from Apple to this machine)"
+	if [ "${METAL-0}" = 1 ]; then
+		./metal/build.sh || die "the Metal probe build failed"
+		EXTRA="${EXTRA:+$EXTRA }../metal/out/ios/hakios-metal-probe"
+		RC_JOBS="${RC_JOBS:-../metal/rc.jobs.metalprobe}"
+		export EXTRA RC_JOBS
+	fi
 	# The Peridot branch carries firmware packaging and Bluetooth fixes until they are upstream.
 	# The old userland checkout and the combined upstream/main tree have different build.sh
 	# contexts, so apply whichever patch fits this tree.

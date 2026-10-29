@@ -30,6 +30,7 @@ that are only built and still need another device run.
 |---|---|
 | Boot and userland | UEFI has been booted from stock Fastboot and iOS userland has reached SpringBoard on the POCO F6. |
 | GPU / UI | Adreno A735 accelerated rendering has appeared to work, including a smooth run. Other runs showed frame stalls, black surfaces, missing widgets, and a blue/black wallpaper. XNU framebuffer/GPU recovery changes and userland packed-16-bit/PosterBoard startup changes are prepared; these latest changes have not been validated on the phone yet. The system UI uses the Mesa/Freedreno OpenGL ES path. Full Metal acceleration is experimental and is not established as working. |
+| Metal | `metal/` carries the new C++ command model (buffers, queues, command buffers, CP copies/fills) over HakiosGPU; its probe is built with `METAL=1`. Shaders and the `_MTLDevice` plugin are not implemented, so CoreAnimation still uses OpenGL ES. |
 | Touch | Touch input works, but can be delayed or unresponsive. The current profile requests a 4 ms poll interval and 480 Hz; this tuning is not yet verified on-device. |
 | Battery | Battery reporting was observed working in a previous userland run. |
 | Thermal | `thermal=1` enables the kernel frequency governor and `ddr=0` avoids a previously crashing DDR RPMh vote. The phone was reported to get very hot; effective thermal sensor feedback and throttling have not yet been confirmed. |
@@ -99,7 +100,8 @@ The Peridot input node is `/dev/hk-touch`; the legacy `/dev/redwood-touch` name 
 
 The Peridot profile uses `GL=1` and the `gpu=1` boot argument for the Mesa/Freedreno OpenGL ES path. `metal=1`
 only enables an experimental Metal registry switch; it does not mean the compositor or app Metal rendering is
-working. Keep Metal plugin discovery opt-in (`metal_props on`).
+working. Keep Metal plugin discovery opt-in (`metal_props on`). The new `metal/` core is a lower-level test path:
+`METAL=1` builds `hakios-metal-probe` and runs it through `rc.jobs.metalprobe`; it does not publish a Metal device.
 
 (Put the `fw-*` directories next to the workspace. Wi-Fi also needs `fw-wifi/mac` — the radio's address on one
 line — and `fw-wifi/network` — network name and password. `userland/build.sh` prints which firmware went in.)
@@ -107,6 +109,7 @@ line — and `fw-wifi/network` — network name and password. `userland/build.sh
 ```sh
 common/build.sh peridot GL=1         # Peridot images and boot artifacts
 common/build.sh peridot BLUETOOTH=1  # same, plus the Bluetooth bridge (needs the cross toolchain)
+common/build.sh peridot METAL=1      # same, plus the hakios-metal GPU probe
 BT=1 common/run.sh peridot           # boot with bt=1 for a Bluetooth test
 ```
 
