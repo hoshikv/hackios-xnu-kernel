@@ -15,7 +15,7 @@ This repository is half of the project:
 | Repository | What |
 |---|---|
 | **hackios-xnu-kernel** (this one) | XNU patches, the EFI loader, the UEFI port, Wi-Fi, QEMU scripts, `xl`, prebuilt kernel/loader/UEFI, `common/` scripts |
-| [hackios-xnu-userland](https://github.com/oosexgang/hackios-xnu-userland) | our init, injected libraries, launchd jobs, the APFS image builder, the scripts that take iOS out of Apple's IPSW, Metal/Mesa work |
+| **upstream/main userland** | our init, injected libraries, launchd jobs, the APFS image builder, the scripts that take iOS out of Apple's IPSW, Metal/Mesa work. The old `hackios-xnu-userland` repository is retired. |
 
 > **No Apple files are in either repository.** `ios165/fetch.sh` downloads the iOS 16.5 IPSW from Apple's own CDN
 > to *your* machine and extracts what is needed there. HackiOS is an independent research project by OOSEX GANG and
@@ -34,7 +34,8 @@ that are only built and still need another device run.
 | Battery | Battery reporting was observed working in a previous userland run. |
 | Thermal | `thermal=1` enables the kernel frequency governor and `ddr=0` avoids a previously crashing DDR RPMh vote. The phone was reported to get very hot; effective thermal sensor feedback and throttling have not yet been confirmed. |
 | Volume and haptics | Volume up/down and vibration were reported not working. |
-| Wi-Fi, Bluetooth, audio | Not confirmed working on Peridot; treat as unfinished. |
+| Wi-Fi and audio | Not confirmed working on Peridot; treat as unfinished. |
+| Bluetooth | The WCN6750 UART transport, firmware download, and upstream-userland bridge are implemented but not yet boot-tested. `bt=1` is in the Peridot profile; build the bridge with `BLUETOOTH=1`. |
 
 These results are specific to the Peridot port. Redwood screenshots, firmware names, and hardware claims do not describe this target.
 
@@ -58,7 +59,7 @@ reads APFS.)
 ```sh
 git clone https://github.com/oosexgang/hackios-xnu-kernel.git hackios
 cd hackios
-common/setup.sh               # brings hackios-xnu-userland into the same tree, checks the host
+common/setup.sh               # extracts upstream/main userland into this tree, checks the host
 ios165/fetch.sh               # downloads 7.4 GB from Apple's CDN and extracts what is needed (5-15 min)
 common/build.sh qemu-virt     # builds the APFS images (and the kernel, if the toolchain is there)
 common/run.sh qemu-virt       # a 20-minute session in a QEMU window
@@ -105,6 +106,7 @@ line — and `fw-wifi/network` — network name and password. `userland/build.sh
 
 ```sh
 common/build.sh peridot GL=1         # Peridot images and boot artifacts
+common/build.sh peridot BLUETOOTH=1  # same, plus the Bluetooth bridge (needs the cross toolchain)
 ```
 
 or step by step with `xl`:
