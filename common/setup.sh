@@ -60,7 +60,7 @@ if [ "$UPSTREAM" = 0 ]; then
 	fi
 	"${UG[@]}" log -1 --format='setup: hackios-xnu-userland at %h (%cs) %s'
 else
-	echo "setup: userland from upstream/main $(git rev-parse --short upstream/main) + Peridot Bluetooth patch"
+	echo "setup: userland from the combined upstream tree + Peridot Bluetooth patch"
 fi
 git log -1 --format='setup: hackios-xnu-kernel   at %h (%cs) %s'
 

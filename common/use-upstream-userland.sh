@@ -7,9 +7,15 @@ set -e
 cd "$(dirname "$(readlink -f "$0")")/.."
 
 P=common/patches/userland-peridot-bluetooth.patch
-if ! git rev-parse --verify upstream/main >/dev/null 2>&1; then
-	echo "use-upstream-userland: no upstream/main; run git fetch upstream first" >&2
-	exit 1
+REF=upstream/main
+if ! git rev-parse --verify "$REF^{commit}" >/dev/null 2>&1; then
+	if git rev-parse --verify origin/main^{commit} >/dev/null 2>&1 &&
+	    git cat-file -e origin/main:userland/build.sh 2>/dev/null; then
+		REF=origin/main
+	else
+		echo "use-upstream-userland: no upstream/main or origin/main userland; run git fetch upstream first" >&2
+		exit 1
+	fi
 fi
 if [ -e userland ] && [ "${FORCE-0}" != 1 ]; then
 	if git apply --reverse --check "$P" >/dev/null 2>&1; then
@@ -23,8 +29,8 @@ if [ -e userland ] && [ "${FORCE-0}" != 1 ]; then
 	fi
 else
 	rm -rf userland
-	git archive upstream/main userland | tar -x
+	git archive "$REF" userland | tar -x
 	git apply -p1 "$P"
-	echo "use-upstream-userland: userland/ from upstream/main $(git rev-parse --short upstream/main), Bluetooth patch applied"
+	echo "use-upstream-userland: userland/ from $REF $(git rev-parse --short "$REF"), Bluetooth patch applied"
 fi
 echo "next: common/build.sh peridot BLUETOOTH=1; boot XNU with bt=1"
