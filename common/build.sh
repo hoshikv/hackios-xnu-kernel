@@ -70,6 +70,9 @@ if ! skip images; then
 		done
 		[ -n "$P" ] || die "cannot apply a Peridot userland patch"
 	fi
+	if [ "${BLUETOOTH-0}" = 1 ] && [ "$P" = common/patches/userland-peridot-firmware.patch ]; then
+		die "BLUETOOTH=1 needs the upstream userland: run common/use-upstream-userland.sh"
+	fi
 	# Do not leave the separately versioned userland checkout dirty after its build, including
 	# when that build exits early.
 	if [ "$USERLAND_PATCH_APPLIED" = 1 ]; then
